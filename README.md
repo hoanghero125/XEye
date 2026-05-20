@@ -1,10 +1,9 @@
 # XEye
-
-> XEye is a wearable, on-device AI assistant for the visually impaired, built on [Qualcomm Dragonwing™ QCS6490](https://www.qualcomm.com/internet-of-things/products/q6-series/qcs6490) Platform - [Thundercomm RUBIK Pi 3](https://rubikpi.ai/).
-
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 > XEye is currently among the **Top 28 shortlisted startups** of [**Qualcomm® Vietnam Innovation Challenge (QVIC) 2026**](https://www.qualcomm.com/company/locations/vietnam/vietnam-innovation-challenge#qvic-2026).  
+
+XEye is a wearable, on-device AI assistant for the visually impaired, built on [Qualcomm Dragonwing™ QCS6490](https://www.qualcomm.com/internet-of-things/products/q6-series/qcs6490) Platform - [Thundercomm RUBIK Pi 3](https://rubikpi.ai/).
 
 ## Pipeline
 
