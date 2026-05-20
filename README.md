@@ -83,10 +83,10 @@ python scripts/vlm_infer.py data/images/IMG_6817.jpg --question "Đây là gì?"
 
 ```bash
 # Synthesize to file
-python scripts/tts_infer.py "Xin chào" --out output.wav
+python scripts/tts_infer.py "Xin chào" --out data/audio/output.wav
 
 # Synthesize with a different voice
-python scripts/tts_infer.py "Xin chào" --out output.wav --voice Binh
+python scripts/tts_infer.py "Xin chào" --out data/audio/output.wav --voice Binh
 ```
 
 ## API Server
@@ -145,13 +145,13 @@ python pipeline.py data/audio/audio.wav --image data/images/IMG_6817.jpg
 Optional flags:
 
 ```bash
-python pipeline.py data/audio/audio.wav --image data/images/IMG_6817.jpg --output answer.wav --voice Binh
+python pipeline.py data/audio/audio.wav --image data/images/IMG_6817.jpg --output data/audio/answer.wav --voice Binh
 ```
 
 Output:
 1. `[STT]` — transcribed Vietnamese question
 2. `[VLM]` — translated question (EN) + answer (EN + VI)
-3. Audio response saved to `output.wav` (default)
+3. Audio response saved to `data/audio/output.wav` (default)
 
 ## Run as Service (PM2)
 

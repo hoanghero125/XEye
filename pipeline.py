@@ -77,7 +77,7 @@ def main():
     parser = argparse.ArgumentParser(description="XEye demo pipeline")
     parser.add_argument("audio", help="Input WAV file (Vietnamese question)")
     parser.add_argument("--image", default=None, help="Input image file (default: capture from camera)")
-    parser.add_argument("--output", default="output.wav", help="Output WAV file (default: output.wav)")
+    parser.add_argument("--output", default="data/audio/output.wav", help="Output WAV file (default: data/audio/output.wav)")
     parser.add_argument("--voice", default="Ly", help="TTS voice (default: Ly)")
     args = parser.parse_args()
 
