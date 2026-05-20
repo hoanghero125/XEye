@@ -1,0 +1,33 @@
+# Models — download via download_models.py
+models/
+
+# llama.cpp — cloned and built locally by setup.sh
+llama.cpp/
+
+# Docs
+docs/
+
+# Claude
+.claude/
+CLAUDE.md
+memory/
+
+# Temp buffers
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+test_camera.sh
