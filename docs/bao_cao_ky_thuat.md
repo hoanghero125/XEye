@@ -499,7 +499,7 @@ Xác nhận: 9 inference threads → `[4,5,6,7]`, uvicorn threads → `[0-7]`.
 | Thành phần | Model | Params | Quantization | Runtime | Hiệu Năng |
 |------------|-------|--------|--------------|---------|-----------|
 | STT | ZipFormer-30M RNNT | ~30M | int8 | sherpa-onnx | ~0.07-0.17s latency, RTF <0.1x |
-| TTS | VieNeu-TTS-v2-Turbo | ~111M | Q4_K_M | llama-cpp + VieNeu-Codec ONNX | ~4-5s latency |
+| TTS | VieNeu-TTS-v2-Turbo | ~111M | Q4_K_M | llama-cpp-python + VieNeu-Codec ONNX | ~4-5s latency |
 | VLM | Vintern-1B-v3_5 | ~1B | Q4_K_M | llama-cpp-python 0.3.16 | ~2.8-3.0 tok/s, ~18-22s/ảnh |
 
 ### 6.2. Giới Hạn Hiện Tại

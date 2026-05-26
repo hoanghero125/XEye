@@ -37,7 +37,7 @@ Camera ────→ Image input ────→ Vision Language Model
 |--------|-------|---------|--------------|-------------|
 | STT | [ZipFormer-30M RNNT](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) | sherpa-onnx | int8 | RTF <0.1x |
 | VLM | [Vintern-1B-v3_5](https://huggingface.co/dekthedev/Vintern-1B-v3_5-GGUF) | llama-cpp-python | Q4_K_M | ~2.8-3.0 tok/s |
-| TTS | [VieNeu-TTS-v2-Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF) | llama-cpp + VieNeu-Codec ONNX | Q4_K_M | ~4-5s latency |
+| TTS | [VieNeu-TTS-v2-Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF) | llama-cpp-python + VieNeu-Codec ONNX | Q4_K_M | ~4-5s latency |
 
 > **Why CPU-only?**  
 > The QCS6490's Hexagon NPU (12 TOPS) is designed for computer vision inference (object detection, classification) — not LLM/VLM workloads. It does not efficiently support attention mechanisms, dynamic KV cache, or large matrix multiplications required by language models. The Adreno GPU shares system RAM, making it unsuitable for models that require several GB of memory. After extensive testing across multiple approaches (llama.cpp Hexagon backend, ONNX Runtime QNN EP, Qualcomm AI Hub), CPU inference with highly quantized models was the only viable path on this hardware.
