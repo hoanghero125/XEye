@@ -5,7 +5,7 @@ models/
 llama.cpp/
 
 # Docs
-docs/
+self_docs/
 
 # Claude
 .claude/

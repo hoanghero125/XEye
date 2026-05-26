@@ -1,32 +1,17 @@
 # Core
-huggingface_hub
-transformers
-tokenizers
-
-# VLM inference (LFM2-VL-450M ONNX int8)
-# torch/torchvision required by Lfm2VlImageProcessor even in ONNX-only mode
---extra-index-url https://download.pytorch.org/whl/cpu
-torch
-torchvision
-# onnxruntime-qnn replaces onnxruntime on QCS6490 — do NOT install both
-onnxruntime-qnn
 numpy
 Pillow
-sacremoses
+requests
+huggingface_hub
 
-# NMT (opus-mt-en-vi CTranslate2 int8)
-ctranslate2
-sentencepiece
-
-# Module B — STT
+# STT
 sherpa-onnx
-sounddevice
 
-# Module C — TTS
+# VLM
+llama-cpp-python
+
+# TTS
 vieneu
-
-# Pipeline
-opencv-python-headless
 
 # API server
 fastapi
