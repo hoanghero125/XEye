@@ -10,13 +10,13 @@ XEye is a wearable, on-device AI assistant for the visually impaired, built on [
 ## Pipeline
 
 ```
-Mic ──→ STT ────→ VI question (text input)
-                          │
-     Camera ────→ Vision Language Model
-                          │
-                  VI answer (text output)
-                          │
-                         TTS ────→ VI answer (audio output) ────→ Speaker playback
+Mic ─────────→ STT ─────────→  VI question (text input)
+                                        ↓
+Camera ────→ Image input ────→ Vision Language Model
+                                        ↓
+                               VI answer (text output)
+                                        ↓
+                                       TTS ────→ VI answer (audio output) ────→ Speaker playback
 ```
 
 ## Hardware
