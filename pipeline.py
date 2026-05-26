@@ -28,7 +28,9 @@ def capture_frame(path: str, warmup: float = 2.0):
     print(f"[camera] Frame saved → {path}")
 
 
-def run(audio_path: str, image_path: str | None, output_path: str = "output.wav", voice: str = "Ly"):
+def run(audio_path: str, image_path: str | None, output_path: str = "output.wav", voice: str = "Bích Ngọc (Nữ - Miền Bắc)"):
+    t_total = time.time()
+
     # 1. Camera capture if no image provided
     _tmp = None
     if image_path is None:
@@ -38,15 +40,17 @@ def run(audio_path: str, image_path: str | None, output_path: str = "output.wav"
         image_path = _tmp.name
 
     # 2. STT
-    print("[pipeline] Transcribing ...")
+    print("[STT] Transcribing ...", flush=True)
+    t0 = time.time()
     wav_bytes = Path(audio_path).read_bytes()
     r = requests.post(f"{SERVER}/stt", files={"audio": (Path(audio_path).name, wav_bytes, "audio/wav")})
     r.raise_for_status()
     question_vi = r.json()["text"]
-    print(f"[STT] {question_vi!r}")
+    print(f"[STT] {question_vi!r}  ({time.time()-t0:.2f}s)")
 
     # 3. VLM
-    print("[pipeline] Analyzing image ...")
+    print("[VLM] Analyzing image ...", flush=True)
+    t0 = time.time()
     img_bytes = Path(image_path).read_bytes()
     suffix    = Path(image_path).suffix.lstrip(".")
     r = requests.post(
@@ -56,17 +60,18 @@ def run(audio_path: str, image_path: str | None, output_path: str = "output.wav"
     )
     r.raise_for_status()
     result = r.json()
-    print(f"[VLM] Question (EN): {result['question_en']}")
-    print(f"[VLM] Answer (EN):   {result['en']}")
-    print(f"[VLM] Answer (VI):   {result['vi']}")
+    print(f"[VLM] {result['vi']}")
+    print(f"[VLM] {result['tokens']} tokens | {result['elapsed_s']}s | {result['tok_s']} tok/s  ({time.time()-t0:.2f}s total)")
 
     # 4. TTS
-    print("[pipeline] Synthesizing speech ...")
+    print("[TTS] Synthesizing ...", flush=True)
+    t0 = time.time()
     r = requests.post(f"{SERVER}/tts", data={"text": result["vi"], "voice": voice})
     r.raise_for_status()
-
     Path(output_path).write_bytes(r.content)
-    print(f"[pipeline] Audio saved → {output_path}")
+    print(f"[TTS] Saved → {output_path}  ({time.time()-t0:.2f}s)")
+
+    print(f"\n[pipeline] Total: {time.time()-t_total:.2f}s")
 
     if _tmp:
         Path(_tmp.name).unlink(missing_ok=True)
@@ -77,8 +82,8 @@ def main():
     parser = argparse.ArgumentParser(description="XEye demo pipeline")
     parser.add_argument("audio", help="Input WAV file (Vietnamese question)")
     parser.add_argument("--image", default=None, help="Input image file (default: capture from camera)")
-    parser.add_argument("--output", default="data/audio/output.wav", help="Output WAV file (default: data/audio/output.wav)")
-    parser.add_argument("--voice", default="Ly", help="TTS voice (default: Ly)")
+    parser.add_argument("--output", default="data/audio/output.wav", help="Output WAV file")
+    parser.add_argument("--voice", default="Bích Ngọc (Nữ - Miền Bắc)", help="TTS voice (default: Bích Ngọc (Nữ - Miền Bắc))")
     args = parser.parse_args()
 
     print(f"[pipeline] Audio:  {args.audio}")

@@ -21,6 +21,5 @@ if __name__ == "__main__":
     )
     r.raise_for_status()
     result = r.json()
-    print(f"Question (EN): {result['question_en']}")
-    print(f"Answer   (EN): {result['en']}")
-    print(f"Answer   (VI): {result['vi']}")
+    print(f"Answer (VI): {result['vi']}")
+    print(f"[{result['tokens']} tokens | {result['elapsed_s']}s | {result['tok_s']} tok/s]")

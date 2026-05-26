@@ -17,8 +17,7 @@ $PIP install --upgrade pip wheel setuptools
 $PIP install -r "$ROOT/requirements.txt"
 
 echo "==> [3/3] Creating directories"
-mkdir -p "$ROOT/models/vlm/onnx"
-mkdir -p "$ROOT/models/nmt"
+mkdir -p "$ROOT/models/vintern"
 mkdir -p "$ROOT/models/stt"
 mkdir -p "$ROOT/models/tts"
 mkdir -p "$ROOT/data/audio"
