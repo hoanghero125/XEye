@@ -10,8 +10,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("text", help="Vietnamese text to synthesize")
     parser.add_argument("--out", default="data/audio/output.wav", help="Output WAV path (default: data/audio/output.wav)")
-    parser.add_argument("--voice", default="Ly",
-                        help="Voice preset: Binh, Tuyen, Vinh, Doan, Ly, Sơn, Ngoc (default: Ly)")
+    parser.add_argument("--voice", default="Bích Ngọc (Nữ - Miền Bắc)",
+                        help="Voice preset (default: Bích Ngọc (Nữ - Miền Bắc)). Available: Bích Ngọc (Nữ - Miền Bắc), Phạm Tuyên (Nam - Miền Bắc), Thục Đoan (Nữ - Miền Nam), Xuân Vĩnh (Nam - Miền Nam)")
     args = parser.parse_args()
 
     r = requests.post(f"{SERVER}/tts", data={"text": args.text, "voice": args.voice})
