@@ -142,7 +142,7 @@ python pipeline.py demo/audio/question.wav --image demo/images/IMG_6817.jpg
 
 **1. STT - Audio input:**
 
-<video src="demo/video/question.mp4" controls width="480"></video>
+[<img width="480" alt="STT question audio" src="https://github.com/user-attachments/assets/baf92f74-7c1e-4821-8de8-f960da0fbb1d" />](https://github.com/user-attachments/assets/baf92f74-7c1e-4821-8de8-f960da0fbb1d)
 
 ```
 [STT] Transcribing ...
@@ -164,7 +164,7 @@ python pipeline.py demo/audio/question.wav --image demo/images/IMG_6817.jpg
 [TTS] Saved → data/audio/output.wav  (4.46s)
 ```
 
-<video src="demo/video/output.mp4" controls width="480"></video>
+[<img width="480" alt="TTS answer audio" src="https://github.com/user-attachments/assets/fe0be70f-bbd4-40a8-b52a-1ecffad11dd1" />](https://github.com/user-attachments/assets/fe0be70f-bbd4-40a8-b52a-1ecffad11dd1)
 
 
 ```
