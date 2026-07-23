@@ -5,7 +5,7 @@
 
 XEye is a wearable, on-device AI assistant for the visually impaired, built on [Qualcomm Dragonwing™ QCS6490](https://www.qualcomm.com/internet-of-things/products/q6-series/qcs6490) Platform - [Thundercomm RUBIK Pi 3](https://rubikpi.ai/).
 
-**Technical Notes:** [English](docs/technical_report.md) · [Tiếng Việt](docs/bao_cao_ky_thuat.md) *(Last updated: 25/05/2026)*
+**Technical Notes:** [English](docs/technical_report.md) · [Tiếng Việt](docs/bao_cao_ky_thuat.md) *(Last updated: 24/07/2026)*
 
 ## Pipeline
 
@@ -29,15 +29,37 @@ Camera ────→ Image input ────→ Vision Language Model
 | **RAM** | 8GB LPDDR4x |
 | **NPU** | Hexagon 780 (V73) — 12 TOPS |
 | **GPU** | Adreno 643 |
+| **Camera** | Raspberry Pi Camera Module 2 (IMX219), CSI connector 1 — captured via GStreamer `qtiqmmfsrc` |
+| **Audio** | Seeed Studio ReSpeaker Lite (USB) — mic array + speaker out |
 | **OS** | Ubuntu (Linux 6.8.0-1071-qcom) |
 
 ## Models
 
 | Module | Model | Runtime | Quantization | Performance |
 |--------|-------|---------|--------------|-------------|
-| STT | [ZipFormer-30M RNNT](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) | sherpa-onnx | int8 | RTF <0.1x |
-| VLM | [Vintern-1B-v3_5](https://huggingface.co/dekthedev/Vintern-1B-v3_5-GGUF) | llama-cpp-python | Q4_K_M | ~2.8-3.0 tok/s |
-| TTS | [VieNeu-TTS-v2-Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF) | llama-cpp-python + VieNeu-Codec ONNX | Q4_K_M | ~4-5s latency |
+| STT | [ZipFormer-30M RNNT](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) | sherpa-onnx | int8 | RTF 0.03-0.07x |
+| VLM | [Vintern-1B-v3_5](https://huggingface.co/dekthedev/Vintern-1B-v3_5-GGUF) | llama-cpp-python | Q4_K_M | ~17-21s per image |
+| TTS | [VieNeu-TTS-v3-Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo) | onnxruntime | int8 | RTF 0.80-0.97x |
+
+### Measured latency
+
+Numbers below are from the running server on the RUBIK Pi 3, using the demo photo (2568×1926, downscaled by the server to 960×720). Warm — the first request after startup is slower.
+
+| Stage | Measurement |
+|-------|-------------|
+| STT | 0.05-0.11s to decode 1.8s of audio (RTF 0.03-0.07x) |
+| VLM — image encode | 12.5-13.9s (mmproj/clip, fixed cost per image) |
+| VLM — image prefill | 3.8-3.9s (256 image tokens) |
+| VLM — total | 17-21s per image |
+| TTS | RTF 0.80-0.97x — 0.6-0.7s for 8 chars, 3.3-4.0s for a typical 80-char answer, 9.1-10.2s for 203 chars |
+| **Time to first sound** | **~20s** (speech starts after the first sentence, not the whole answer) |
+| **End-to-end** | **~24-26s** |
+
+The camera capture runs during the recording window, and synthesis runs one sentence ahead of playback, so neither shows up in the total. Server startup to first servable request is 12.9s.
+
+> **On `tok_s`:** the `/vlm` endpoint reports `tokens ÷ total elapsed`, and total elapsed includes the ~16-18s fixed image cost. It therefore rises with answer length — **3.0-3.7 tok/s** for a full description (58-75 tokens), ~1.0-1.7 tok/s for a short one-line answer. It is not a pure decode rate.
+
+> **Sustained use:** the SoC reaches 82-89°C under continuous inference and cpu7 throttles from 2707 to ~2035MHz. Image encode rises from 13.3s cold to a **plateau of 15.3s** after ~10 requests and stays flat — the device settles ~2s slower, it does not degrade continuously.
 
 > **Why CPU-only?**  
 > The QCS6490's Hexagon NPU (12 TOPS) is designed for computer vision inference (object detection, classification) — not LLM/VLM workloads. It does not efficiently support attention mechanisms, dynamic KV cache, or large matrix multiplications required by language models. The Adreno GPU shares system RAM, making it unsuitable for models that require several GB of memory. After extensive testing across multiple approaches (llama.cpp Hexagon backend, ONNX Runtime QNN EP, Qualcomm AI Hub), CPU inference with highly quantized models was the only viable path on this hardware.
@@ -51,31 +73,35 @@ bash setup.sh
 # 2. Activate environment
 conda activate xeye
 
-# 3. Download all models (~1.3GB total)
+# 3. Download all models (~1.4GB total)
 python download_models.py
 
 # 4. Start server
 python server.py
 ```
 
+Models are split across two locations: the VLM and STT weights land in `models/` (~1.1GB), while the TTS ONNX graphs and the MOSS audio tokenizer go to the HuggingFace cache (`~/.cache/huggingface/hub`, ~286MB), where the `vieneu` package loads them from.
+
+> `setup.sh` installs `vieneu` with `--no-deps` — the package declares `gradio` as a hard dependency, which the board does not need. Its actual runtime requirements are listed in `requirements.txt`.
+
 ## Testing AI Services
 
-Server must be running before using any script (`python server.py`).
+Server must be running before using any script (`python server.py`). The commands below use the sample files in `demo/` (`data/` is a scratch directory and is not tracked in git).
 
 ### STT
 
 ```bash
-python scripts/stt_infer.py --file data/audio/question.wav
+python scripts/stt_infer.py --file demo/audio/question.wav
 ```
 
 ### VLM
 
 ```bash
 # Describe image (no question — uses default prompt)
-python scripts/vlm_infer.py data/images/IMG_6817.jpg
+python scripts/vlm_infer.py demo/images/IMG_6817.jpg
 
 # Ask a Vietnamese question
-python scripts/vlm_infer.py data/images/IMG_6817.jpg --question "Đây là gì?"
+python scripts/vlm_infer.py demo/images/IMG_6817.jpg --question "Đây là gì?"
 ```
 
 ### TTS
@@ -85,8 +111,19 @@ python scripts/vlm_infer.py data/images/IMG_6817.jpg --question "Đây là gì?"
 python scripts/tts_infer.py "Xin chào" --out data/audio/output.wav
 
 # Synthesize with a different voice
-python scripts/tts_infer.py "Xin chào" --out data/audio/output.wav --voice "Phạm Tuyên (Nam - Miền Bắc)"
+python scripts/tts_infer.py "Xin chào" --out data/audio/output.wav --voice "Phạm Tuyên"
 ```
+
+### Camera preview
+
+Live MJPEG preview for aiming the camera and checking focus — open `http://<board-ip>:8080/`:
+
+```bash
+python scripts/camera_preview.py
+python scripts/camera_preview.py --ev 4 --rotate 90    # brighter, and rotated if side-mounted
+```
+
+Capture uses `exposure-compensation=2` (range −12..12) — measured on this board, +2 lifts a dim indoor scene from mean brightness 122 to 138, while +4 and +6 blow out 22%/29% of pixels. Auto-exposure needs ~5 frames to settle, so the first moment of any stream or capture is dark. Only one viewer at a time: the camera allows a single consumer.
 
 ## API Server
 
@@ -94,10 +131,14 @@ Runs at `http://0.0.0.0:8000`
 
 | Endpoint | Method | Input | Output |
 |----------|--------|-------|--------|
-| `/health` | GET | — | `{"status": "ok"}` |
+| `/health` | GET | — | `{"status": "ok", "models": ["stt", "vlm", "tts"]}` |
 | `/stt` | POST | WAV file (multipart) | `{"text": "..."}` |
 | `/vlm` | POST | `image` (file), `question` (Vietnamese, optional) | `{"vi": "...", "tokens": N, "elapsed_s": N, "tok_s": N}` |
 | `/tts` | POST | `text` (Vietnamese), `voice` (name, optional) | WAV audio bytes |
+
+`/vlm` downscales the image to fit within 1280×720, caps generation at 128 tokens, and uses `repeat_penalty=1.1` (llama-cpp-python defaults to 1.0, i.e. disabled, which lets the model fall into repetition loops). It appends `" Trả lời bằng tiếng Việt."` to every prompt — without it the model replies in English ~half the time on empty or nonsense questions. With no `question`, it falls back to the prompt `"Mô tả những gì bạn thấy."`. `/stt` expects 16kHz mono WAV; `/tts` returns 48kHz mono WAV, synthesized with the `tu_nhien` style and no audio watermark.
+
+Endpoints run in FastAPI's threadpool with model access serialized by a lock, so `/health` stays responsive (5-9ms) while inference is running.
 
 ### Example calls
 
@@ -107,34 +148,78 @@ curl http://localhost:8000/health
 
 # STT
 curl -X POST http://localhost:8000/stt \
-  -F "audio=@data/audio/question.wav"
+  -F "audio=@demo/audio/question.wav"
 
 # VLM
 curl -X POST http://localhost:8000/vlm \
-  -F "image=@data/images/IMG_6817.jpg" \
+  -F "image=@demo/images/IMG_6817.jpg" \
   -F "question=Đây là gì?"
 
 # TTS
 curl -X POST http://localhost:8000/tts \
   -F "text=Xin chào" \
-  -F "voice=Bích Ngọc (Nữ - Miền Bắc)" \
+  -F "voice=Mai Anh" \
   --output response.wav
 ```
 
 ### TTS Voices
 
-| Name | Gender | Dialect |
-|------|--------|---------|
-| `Bích Ngọc (Nữ - Miền Bắc)` | Female | Northern **(default)** |
-| `Phạm Tuyên (Nam - Miền Bắc)` | Male | Northern |
-| `Thục Đoan (Nữ - Miền Nam)` | Female | Southern |
-| `Xuân Vĩnh (Nam - Miền Nam)` | Male | Southern |
+14 built-in voices — 7 female, 7 male, across all three dialects:
+
+| Name | Gender | Dialect | Name | Gender | Dialect |
+|------|--------|---------|------|--------|---------|
+| `Mai Anh` | Female | Northern **(default)** | `Thục Đoan` | Female | Southern |
+| `Trúc Ly` | Female | Northern | `Thùy Dung` | Female | Southern |
+| `Đoan Trang` | Female | Northern | `Xuân Vĩnh` | Male | Southern |
+| `Ngọc Linh` | Female | Northern | `Thái Sơn` | Male | Southern |
+| `Phạm Tuyên` | Male | Northern | `Minh Triết` | Male | Southern |
+| `Thanh Bình` | Male | Northern | `Ngọc Trân` | Female | Central |
+| `Minh Đức` | Male | Northern | `Quang Sơn` | Male | Central |
+
+Every voice is rendered with the `tu_nhien` (natural) style rather than its own preset style — the `tin_tuc` and `doc_truyen` styles insert mid-sentence pauses that break up short answers.
+
+v3 can also clone a voice from a 3–5s reference clip; XEye does not expose that through the API.
 
 ## Demo
 
 ```bash
+# Full hardware loop: camera + ReSpeaker mic in, ReSpeaker speaker out
+python pipeline.py
+
+# Longer question window, or keep the answer silent
+python pipeline.py --record 8
+python pipeline.py --no-play
+
+# Replay from files instead of live hardware
 python pipeline.py demo/audio/question.wav --image demo/images/IMG_6817.jpg
 ```
+
+With no arguments the pipeline captures a frame from the camera, records `--record` seconds (default 5) from the ReSpeaker mic array at 16kHz, and plays the spoken answer back through the ReSpeaker's speaker. The ALSA device is located by card name, so it survives card-order changes. Either input can be overridden by passing a WAV path or `--image`.
+
+The frame is captured *while* the question is being recorded, and the answer is synthesized one sentence ahead of playback, so speech starts after the first sentence rather than the whole reply.
+
+### dev vs prod mode
+
+| Mode | Behaviour |
+|------|-----------|
+| `dev` *(default)* | Saves the answer to `data/audio/output.wav` so you can listen back |
+| `prod` | Writes nothing to disk — the answer only goes to the speaker |
+
+Production avoids ~0.6MB of flash writes per query and leaves no recording of what the user asked or saw. Switch it whichever way suits:
+
+```bash
+python pipeline.py --mode prod          # one run
+export XEYE_MODE=prod                   # this shell / service
+# or edit MODE at the top of pipeline.py to change the default
+```
+
+Passing `--output PATH` always saves, even in prod, for one-off debugging.
+
+Without `--image`, `pipeline.py` grabs one 1280×720 frame from the Camera Module 2 through GStreamer (`qtiqmmfsrc camera=0`) before running the pipeline — this requires the Qualcomm camera stack on the board. It records a short burst and keeps the newest frame, since auto-exposure needs a moment to settle. Output is written to `data/audio/output.wav` by default (`--output` to change it).
+
+> The board's CSI port takes a **22-pin 0.5mm FPC** (Raspberry Pi 5 style). Camera Module 2's stock 15-pin cable does not fit. Only the standard Module 2/3 are supported — not the NoIR or wide-angle variants. Never connect or disconnect the camera while the board is powered.
+
+The run below was recorded with `--image`:
 
 **Input image:**
 
@@ -171,6 +256,8 @@ python pipeline.py demo/audio/question.wav --image demo/images/IMG_6817.jpg
 [pipeline] Total: 21.38s
 ```
 
+> The attached answer audio was recorded before the v2 → v3 TTS migration, so it is the old 24kHz `Bích Ngọc` voice. Current output is 48kHz `Mai Anh`; re-record when convenient.
+
 
 
 
@@ -188,6 +275,7 @@ pm2 startup
 
 ```
 xeye
+├─ data/                        # Scratch dir for inputs/outputs (not tracked)
 ├─ demo
 │  ├─ audio/                    # Demo WAV files
 │  ├─ images/                   # Demo images
@@ -195,16 +283,16 @@ xeye
 ├─ docs
 │  ├─ bao_cao_ky_thuat.md       # Technical report (Vietnamese)
 │  └─ technical_report.md       # Technical report (English)
-├─ models
-│  ├─ vintern/                  # Vintern-1B-v3_5 GGUF + mmproj
-│  ├─ stt/                      # ZipFormer RNNT int8 ONNX
-│  └─ tts/                      # VieNeu-TTS-v2-Turbo GGUF + voices
+├─ models                       # (not tracked — created by download_models.py)
+│  ├─ vintern/                  # Vintern-1B-v3_5 GGUF + mmproj F16
+│  └─ stt/                      # ZipFormer RNNT int8 ONNX
+│                               # TTS weights live in ~/.cache/huggingface/hub
 ├─ scripts
 │  ├─ stt_infer.py              # STT test script
 │  ├─ vlm_infer.py              # VLM test script
 │  └─ tts_infer.py              # TTS test script
 ├─ server.py                    # FastAPI server (STT / VLM / TTS endpoints)
-├─ pipeline.py                  # Demo pipeline (WAV + image → text + audio)
+├─ pipeline.py                  # Demo pipeline (WAV + image/camera → text + audio)
 ├─ download_models.py           # Download all models from HuggingFace
 ├─ setup.sh                     # Create conda env + install deps
 └─ requirements.txt

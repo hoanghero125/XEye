@@ -1,13 +1,17 @@
 # Báo Cáo Kỹ Thuật: XEye
 
-**Cập nhật lần cuối:** 25/05/2026  
+**Cập nhật lần cuối:** 24/07/2026  
 **Tác giả:** Đỗ Phạm Bảo Hoàng
+
+Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên server đang chạy ngày 23-24/07/2026 (RUBIK Pi 3, trạng thái warm — request đầu tiên sau khi khởi động server luôn chậm hơn).
 
 ---
 
 ## Mục Lục
 
 - [1. Thông Tin Hệ Thống](#1-thông-tin-hệ-thống)
+  - [1.1. Phần Cứng](#11-phần-cứng)
+  - [1.2. Phần Mềm](#12-phần-mềm)
 - [2. Speech-to-Text (STT)](#2-speech-to-text-stt)
   - [2.1. Mô Hình Sử Dụng](#21-mô-hình-sử-dụng)
 - [3. Text-to-Speech (TTS)](#3-text-to-speech-tts)
@@ -16,6 +20,7 @@
     - [3.2.1. Thử Nghiệm 1](#321-thử-nghiệm-1)
     - [3.2.2. Thử Nghiệm 2: Tìm model phù hợp hơn](#322-thử-nghiệm-2-tìm-model-phù-hợp-hơn)
     - [3.2.3. Thử Nghiệm 3: Tối ưu](#323-thử-nghiệm-3-tối-ưu)
+    - [3.2.4. Thử Nghiệm 4: Migrate sang v3 Turbo](#324-thử-nghiệm-4-migrate-sang-v3-turbo)
 - [4. Vision-Language Model (VLM)](#4-vision-language-model-vlm)
   - [4.1. Mô Hình Sử Dụng](#41-mô-hình-sử-dụng)
   - [4.2. Lịch Sử Thử Nghiệm](#42-lịch-sử-thử-nghiệm)
@@ -28,8 +33,13 @@
     - [4.2.7. Thử Nghiệm 7: Mô hình xịn hơn](#427-thử-nghiệm-7-mô-hình-xịn-hơn)
     - [4.2.8. Thử Nghiệm 8: Vintern-1B](#428-thử-nghiệm-8-vintern-1b)
     - [4.2.9. Thử Nghiệm 9: GPU Vulkan Offload](#429-thử-nghiệm-9-gpu-vulkan-offload)
+    - [4.2.10. Thử Nghiệm 10: Khảo Sát Ngưỡng Trần Tốc Độ](#4210-thử-nghiệm-10-khảo-sát-ngưỡng-trần-tốc-độ)
+    - [4.2.11. Thử Nghiệm 11: Tinh Chỉnh Độ Dài Câu Trả Lời](#4211-thử-nghiệm-11-tinh-chỉnh-độ-dài-câu-trả-lời)
 - [5. Tối Ưu Hóa Hệ Thống](#5-tối-ưu-hóa-hệ-thống)
   - [5.1. Thread Affinity](#51-thread-affinity)
+  - [5.2. Chạy Song Song Trong Pipeline](#52-chạy-song-song-trong-pipeline)
+  - [5.3. Độ Trễ End-to-End](#53-độ-trễ-end-to-end)
+  - [5.4. Hành Vi Nhiệt](#54-hành-vi-nhiệt)
 - [6. Tổng kết](#6-tổng-kết)
   - [6.1. Mô Hình Được Chọn](#61-mô-hình-được-chọn)
   - [6.2. Giới Hạn Hiện Tại](#62-giới-hạn-hiện-tại)
@@ -37,6 +47,8 @@
 ---
 
 ## 1. Thông Tin Hệ Thống
+
+### 1.1. Phần Cứng
 
 | Thành phần | Thông số |
 |------------|----------|
@@ -46,7 +58,23 @@
 | CPU | 4× Cortex-A55 @1.96GHz + 3× Cortex-A78 @2.40GHz + 1× Cortex-X1 @2.71GHz |
 | GPU | Adreno 643 |
 | NPU | Hexagon 780 (V73), 12 TOPS |
+| Camera | Raspberry Pi Camera Module 2 (IMX219) trên CSI connector 1, chụp qua GStreamer `qtiqmmfsrc` ở 1280×720 NV12. Board yêu cầu FPC 22-pin 0.5mm; chỉ hỗ trợ bản standard (không hỗ trợ NoIR/wide-angle) |
+| Audio | Seeed Studio ReSpeaker Lite (USB) — mic array vào, speaker ra |
 | OS | Ubuntu (Linux 6.8.0-1071-qcom) |
+
+### 1.2. Phần Mềm
+
+Các phiên bản đã dùng khi đo số liệu trong báo cáo này. Ba runtime inference đã được pin trong `requirements.txt`; các dependency còn lại (FastAPI, uvicorn, numpy, Pillow) không pin nên có thể ra phiên bản mới hơn.
+
+| Package | Phiên bản |
+|---------|-----------|
+| Python | 3.11.15 |
+| llama-cpp-python | 0.3.16 (chỉ dùng cho VLM) |
+| sherpa-onnx | 1.13.2 |
+| vieneu | 3.2.3 (cài với `--no-deps`) |
+| onnxruntime | 1.24.4 |
+| sea-g2p / perth | 0.7.20 / 1.0.0 |
+| FastAPI / uvicorn | 0.136.1 / 0.47.0 |
 
 ---
 
@@ -68,10 +96,13 @@
 
 #### 2.1.2. Hiệu Năng
 
+Đo trên một câu nói tiếng Việt dài 1.8s.
+
 | Metric | Giá trị |
 |--------|---------|
-| Latency (câu ngắn) | 0.07-0.17s |
-| RTF | <0.1x |
+| Latency decode (warm) | 0.05-0.11s |
+| RTF (warm) | 0.03-0.07x |
+| Latency decode (request đầu sau khi khởi động) | ~0.9s |
 
 ---
 
@@ -83,30 +114,55 @@
 
 | Thuộc tính | Giá trị |
 |------------|---------|
-| Model | VieNeu-TTS-v2-Turbo |
-| Params | ~111M |
-| Quantization | Q4_K_M |
-| Format | GGUF |
-| Codec | VieNeu-Codec (encoder + decoder ONNX) |
-| Voice format | 128-dim speaker embedding |
-| Threads | 4 |
-| Sample rate | 24000 Hz |
+| Model | VieNeu-TTS-v3-Turbo |
+| Params | ~0.1B |
+| Quantization | int8 |
+| Format | ONNX (graph trong `onnx_int8/`) |
+| Runtime | onnxruntime (engine CPU không cần torch) |
+| Codec | MOSS-Audio-Tokenizer-Nano ONNX |
+| Voice format | 192-dim speaker embedding + reference codes đã encode sẵn |
+| Threads | 2 (intra-op) |
+| Style | `tu_nhien`, cố định cho mọi voice |
+| Watermark | tắt |
+| Sample rate | 48000 Hz |
 
 #### 3.1.2. Voices Khả Dụng
 
-| Tên | Giới tính | Vùng |
-|-----|-----------|------|
-| Bích Ngọc | Nữ | Miền Bắc |
-| Phạm Tuyên | Nam | Miền Bắc |
-| Thục Đoan | Nữ | Miền Nam |
-| Xuân Vĩnh | Nam | Miền Nam |
+14 preset — 7 nữ, 7 nam, đủ cả ba vùng miền. Model hỗ trợ clone giọng từ đoạn mẫu 3-5 giây
+nhưng XEye không expose tính năng này qua API.
+
+| Tên | Giới tính | Vùng | Style gốc |
+|-----|-----------|------|-----------|
+| Mai Anh | Nữ | Miền Bắc | tin_tuc **(mặc định của XEye)** |
+| Trúc Ly | Nữ | Miền Bắc | tu_nhien |
+| Đoan Trang | Nữ | Miền Bắc | tu_nhien |
+| Ngọc Linh | Nữ | Miền Bắc | doc_truyen |
+| Phạm Tuyên | Nam | Miền Bắc | tu_nhien |
+| Thanh Bình | Nam | Miền Bắc | doc_truyen |
+| Minh Đức | Nam | Miền Bắc | tin_tuc |
+| Thục Đoan | Nữ | Miền Nam | doc_truyen |
+| Thùy Dung | Nữ | Miền Nam | tin_tuc |
+| Xuân Vĩnh | Nam | Miền Nam | tu_nhien |
+| Thái Sơn | Nam | Miền Nam | doc_truyen |
+| Minh Triết | Nam | Miền Nam | tin_tuc |
+| Ngọc Trân | Nữ | Miền Trung | tu_nhien |
+| Quang Sơn | Nam | Miền Trung | tu_nhien |
+
+XEye ghi đè style gốc của mọi voice thành `tu_nhien`. Style `tin_tuc` (đọc tin) và `doc_truyen`
+(kể chuyện) chèn khoảng nghỉ giữa câu: với câu trả lời một câu, `Mai Anh` ở `tin_tuc` tạo ra
+một khoảng ngắt 280ms giữa câu, trong khi ở `tu_nhien` là **không có khoảng nghỉ nào** với
+cùng thời gian tổng hợp.
 
 #### 3.1.3. Hiệu Năng
 
-| Metric | Giá trị |
-|--------|---------|
-| Latency (đoạn ngắn) | ~4-5s |
-| Tốc độ so với Standard | ~2x |
+Đo qua server đang chạy. Thời gian tổng hợp tỉ lệ với độ dài text; RTF khá ổn định, chỉ kém đi
+một chút với input dài.
+
+| Input | Audio sinh ra | Thời gian tổng hợp | RTF |
+|-------|---------------|--------------------|-----|
+| 8 ký tự | 0.8s | 0.6-0.7s | 0.80-0.84x |
+| 83 ký tự (độ dài câu trả lời VLM điển hình) | 3.9-4.6s | 3.3-4.0s | 0.84-0.87x |
+| 203 ký tự | 9.8-10.6s | 9.1-10.2s | 0.93-0.97x |
 
 ---
 
@@ -165,7 +221,62 @@ Latency chấp nhận được, vẫn có thể tối ưu hơn về tốc độ.
 
 ##### 3.2.3.2. Kết Quả
 
-Nhanh hơn ~2x. 
+Nhanh hơn ~2x. Được dùng cho tới khi migrate sang v3 bên dưới.
+
+---
+
+#### 3.2.4. Thử Nghiệm 4: Migrate sang v3 Turbo
+
+v3 Turbo được phát hành như một model train from scratch (~10k giờ EN-VI), không phải fine-tune
+từ v2. Model này không phát hành bản GGUF — trên CPU, package `vieneu` chạy engine ONNX Runtime
+không cần torch, nên đường llama.cpp dùng cho v2 trở thành extra `legacy` của thư viện.
+
+##### 3.2.4.1. So Sánh
+
+Cả hai đều đo trên board này, cùng bộ text, trạng thái warm:
+
+| | v2-Turbo | v3-Turbo |
+|---|---|---|
+| Runtime | llama-cpp-python + VieNeu-Codec | onnxruntime int8 |
+| Sample rate | 24 kHz | 48 kHz |
+| 8 ký tự | 0.7s | 0.6-0.7s |
+| 83 ký tự | 3.2s | 3.3-4.0s |
+| 203 ký tự | 8.5s | 9.1-10.2s |
+| Peak RSS (chạy riêng) | 3293 MB | 1385 MB |
+| Dung lượng đĩa | 655 MB | 286 MB |
+| Voices | 4 | 14 + clone giọng |
+
+Tốc độ xấp xỉ ngang nhau ở độ dài câu trả lời điển hình và chậm hơn ~10-20% với input dài, đổi
+lại sample rate gấp đôi, peak memory giảm 58% và dung lượng đĩa giảm 56%.
+
+##### 3.2.4.2. Vấn Đề: Oversubscription Thread
+
+v3 tạo ~8 ONNX session. Giữ nguyên `threads=4` như v2 gây oversubscription trên 4 performance
+core khi cả ba model cùng nằm trong một process:
+
+| Intra-op threads | Trung vị (203 ký tự, trong server) |
+|------------------|------------------------------------|
+| 1 | 12.1-12.8s |
+| **2** | **9.5s** |
+| 3 | 10.5s |
+| 4 | 10.9s |
+
+→ Giải pháp: `threads=2`. Lưu ý giá trị tối ưu phụ thuộc ngữ cảnh — khi đo riêng lẻ, không có
+model nào khác trong RAM, `threads=4` mới là nhanh nhất (~8.6s).
+
+##### 3.2.4.3. Vấn Đề: Thread Gọi Làm Nghẽn Cả Phép Tính
+
+ONNX Runtime dùng chính thread *gọi* làm một trong các intra-op worker. Request được phục vụ
+bởi thread uvicorn, vốn đã được cố ý bỏ pin về `[0-7]` sau khi load model (5.1), nên thread gọi
+có thể rơi vào một core A55 và làm nghẽn toàn bộ phép tính — 12.6-18.3s với text 203 ký tự,
+dao động rất lớn.
+
+→ Giải pháp: context manager `perf_cores()` trong `server.py` pin thread gọi vào `{4,5,6,7}`
+trong suốt `infer()`, rồi khôi phục mask cũ sau đó.
+
+##### 3.2.4.4. Kết Quả
+
+Đã migrate. Output 48 kHz, 14 voices, peak memory chưa bằng một nửa v2.
 
 ---
 
@@ -185,13 +296,32 @@ Nhanh hơn ~2x.
 | Runtime | llama-cpp-python 0.3.16 |
 | Threads | 4 |
 | Context | 2048 |
+| Max new tokens | 128 |
+| Repeat penalty | 1.1 |
+
+`llama-cpp-python` để mặc định `repeat_penalty` là 1.0 — tức tắt — trong khi mặc định của chính
+llama.cpp là 1.1. Khi để 1.0, model thỉnh thoảng rơi vào vòng lặp lặp từ chạy đến hết token cap:
+một trong mười lần chạy sinh ra `"... giá cả - Giá cả - Giá cả - Giá cả"`. Chi phí đo được của
+penalty là **2 ms/token** (47 → 49 ms/token), tức ~0.1s cho câu trả lời 60 token.
 
 #### 4.1.2. Hiệu Năng
 
-| Metric | Giá trị |
-|--------|---------|
-| Throughput | ~2.8-3.0 tok/s |
-| Ngôn ngữ | Tiếng Việt |
+Đo trên ảnh demo — 2568×1926, được server thu nhỏ còn 960×720 (mọi ảnh đầu vào đều được thu về vừa khung 1280×720).
+
+| Giai đoạn | Thời gian |
+|-----------|-----------|
+| Encode ảnh (mmproj/clip) | 12.5-13.9s |
+| Prefill ảnh (256 image tokens) | 3.8-3.9s |
+| **Tổng mỗi ảnh** | **17-21s** |
+
+Chi phí xử lý ảnh là cố định cho mỗi request và chiếm phần lớn thời gian: mất ~16-18s trước khi sinh ra token text đầu tiên. Giá trị `tok_s` mà server trả về là `completion_tokens ÷ tổng thời gian`, nên nó tăng theo độ dài câu trả lời chứ không phải tốc độ decode thuần:
+
+| Độ dài câu trả lời | Throughput báo cáo |
+|--------------------|--------------------|
+| 58-75 tokens (mô tả đầy đủ, prompt mặc định) | 3.0-3.7 tok/s |
+| 17-29 tokens (trả lời ngắn cho câu hỏi cụ thể) | 1.0-1.7 tok/s |
+
+Ngôn ngữ output: Tiếng Việt.
 
 ---
 
@@ -402,7 +532,7 @@ Thử fold `DequantizeLinear` nodes có constant input để giảm số lượn
 | Thuộc tính | Giá trị |
 |------------|---------|
 | Model | Vintern-1B-v3_5 (InternVL2.5-1B fine-tuned VI) |
-| Backbone | ~462MB |
+| Backbone | ~491MB |
 | Quantization | Q4_K_M |
 | Format | GGUF |
 | mmproj | ~620MB, F16 |
@@ -416,23 +546,37 @@ Giải pháp: subclass `Llava15ChatHandler` - image injection xảy ra ở C-lev
 
 ```python
 class InternVL2ChatHandler(Llava15ChatHandler):
+    """Llava15ChatHandler image injection + InternVL2 ChatML prompt format."""
     DEFAULT_SYSTEM_MESSAGE = None
     CHAT_FORMAT = (
         "{% for message in messages %}"
+        "{% if message.role == 'system' %}"
+        "<|im_start|>system\n{{ message.content }}<|im_end|>\n"
+        "{% endif %}"
         "{% if message.role == 'user' %}"
         "<|im_start|>user\n"
+        "{% if message.content is iterable and message.content is not string %}"
         "{% for content in message.content %}"
-        "{% if content.type == 'image_url' %}{{ content.image_url.url }}\n{% endif %}"
+        "{% if content.type == 'image_url' %}"
+        "{% if content.image_url is string %}{{ content.image_url }}\n{% endif %}"
+        "{% if content.image_url is mapping %}{{ content.image_url.url }}\n{% endif %}"
+        "{% endif %}"
         "{% endfor %}"
         "{% for content in message.content %}"
         "{% if content.type == 'text' %}{{ content.text }}{% endif %}"
         "{% endfor %}"
+        "{% else %}{{ message.content }}{% endif %}"
         "<|im_end|>\n"
+        "{% endif %}"
+        "{% if message.role == 'assistant' %}"
+        "<|im_start|>assistant\n{{ message.content }}<|im_end|>\n"
         "{% endif %}"
         "{% endfor %}"
         "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
     )
 ```
+
+Template xử lý luôn cả lượt system và assistant, content dạng chuỗi thuần, và cả hai dạng string lẫn mapping của `image_url`, vì llama-cpp-python có thể truyền vào bất kỳ dạng nào.
 
 mmproj F16 ~620MB là kích thước đúng - InternViT-300M × 2 bytes/param ≈ 600MB.
 
@@ -467,6 +611,116 @@ Turnip không hỗ trợ compute shader với workgroup barrier — loại shade
 
 ---
 
+#### 4.2.10. Thử Nghiệm 10: Khảo Sát Ngưỡng Trần Tốc Độ
+
+Chất lượng của Vintern-1B-v3_5 được đánh giá là đã đủ dùng, nên đợt khảo sát này chỉ tìm các
+cách giảm độ trễ mà không đánh đổi chất lượng. Đường xử lý ảnh chiếm ~16s mỗi request
+(12-13s encode + ~4s prefill) nên đó là mục tiêu.
+
+##### 4.2.10.1. Encoder Có Bị Giới Hạn Bởi Compute Không?
+
+| Cores | Threads | Trung vị (encode + prefill) |
+|-------|---------|-----------------------------|
+| `{4,5,6,7}` | 4 | **19.02s** |
+| cả 8 | 8 | 19.20s |
+| cả 8 | 6 | 19.29s |
+| `{4,5,6,7}` | 3 | 21.84s |
+
+Tăng gấp đôi số core không thay đổi gì; giảm xuống dưới 4 thì tệ đi. Độ phân giải đầu vào cũng
+không ảnh hưởng — 960×720, 448×448 và 224×224 encode lần lượt hết 12.4s, 13.2s và 13.7s, vì
+model luôn xử lý đúng một tile 448px cố định.
+
+##### 4.2.10.2. mmproj F16 → Q8_0
+
+Projector F16 nặng 592MB, là artifact lớn nhất trong đường xử lý ảnh. Việc requantize 146
+tensor trọng số 2D sang Q8_0 (318MB) được kỳ vọng sẽ giảm lưu lượng bộ nhớ.
+
+| mmproj | Dung lượng | Encode + prefill |
+|--------|------------|------------------|
+| **F16** | 592MB | **18.85s** |
+| Q8_0 | 318MB | 20.84s |
+
+→ **Loại bỏ: chậm hơn 10%.** Chất lượng output không đổi. CPU có `asimdhp` (FP16 native) nhưng
+không có `i8mm` hay SVE, nên kernel F16 vốn đã hợp với phần cứng, trong khi Q8_0 thêm chi phí
+dequantize mà không có đường matmul int8 nào để bù lại.
+
+Lưu ý `llama-quantize` không làm được việc này — nó từ chối architecture `clip`. File được tạo
+bằng cách requantize tensor trực tiếp qua `gguf-py`.
+
+##### 4.2.10.3. llama.cpp Bản Mới
+
+Build `llama-mtmd-cli` từ master và chạy đúng tấm ảnh đó: master áp dụng tiền xử lý dynamic
+**4 tile** của InternVL, encode hết 52s + 13s so với 12-13s ở bản đang pin.
+`--image-max-tokens` không ghi đè được hành vi này.
+
+→ **Việc pin `llama-cpp-python==0.3.16` là thiết yếu.** Độ trễ hiện tại có được là nhờ
+`Llava15ChatHandler` của bản này chỉ encode một tile duy nhất. Nâng version lên sẽ làm độ trễ
+VLM tăng gấp 4 lần. Hệ quả kèm theo là XEye đang chạy model ở độ phân giải hiệu dụng thấp hơn
+thiết kế gốc — một đánh đổi chất lượng lấy tốc độ có chủ đích.
+
+##### 4.2.10.4. Kết Quả
+
+Không hướng nào cải thiện được cấu hình hiện tại. 17-21s mỗi ảnh là ngưỡng sàn cho model này
+trên phần cứng này.
+
+---
+
+#### 4.2.11. Thử Nghiệm 11: Tinh Chỉnh Độ Dài Câu Trả Lời
+
+Bản thân VLM luôn tốn ~20s cố định, nhưng độ dài câu trả lời tốn khoảng **0.25s tương tác mỗi
+token** (thời gian tổng hợp TTS cộng thời gian người dùng nghe). Câu trả lời 62 token dành 32s
+trong tổng số 52s chỉ để nói, nên prompt ngắn gọn hơn trông như một khoản latency miễn phí.
+
+Năm biến thể prompt được chạy trên ba ảnh (một ảnh phòng họp nhiều chữ, hai khung hình camera
+trực tiếp), mỗi biến thể hai lần, và được chấm theo nội dung thật của ảnh chứ không để model
+tự chấm.
+
+| Prompt | Độ bao phủ ở cảnh thực | Bịa đặt | Kiểu lỗi |
+|--------|------------------------|---------|----------|
+| **Hiện tại** `Mô tả những gì bạn thấy.` | chai nước, bàn phím hồng, tai nghe, cửa sổ, điện thoại | tiêu đề slide | một lần chạy tràn tới token cap |
+| `Chỉ nêu vật thể chính…` | chỉ người + bàn | bịa "đang chơi game" | — |
+| `Có gì trước mặt tôi?` | **bỏ sót hoàn toàn con người** (2/2) | bịa tiêu đề slide | — |
+| `Nêu ngắn gọn những người và vật thể chính` | người + điện thoại | không | một lần thu về 3 token |
+| `Mô tả … trong hai câu ngắn.` | người + điện thoại + tai nghe | gọi điện thoại là "máy tính" | — |
+
+Các biến thể ngắn nhanh hơn 24s nhưng chỉ vì chúng bỏ qua đúng những vật thể làm thiết bị trở
+nên hữu ích — chai nước trong tầm với, bàn phím, cửa sổ. Chúng cũng vẫn bịa ("đang chơi game"
+trong khi người dùng đang nhìn điện thoại).
+
+Thêm `Không đọc chữ.` vào prompt **không** ngăn được việc bịa tiêu đề slide — model 1B không
+tuân thủ ổn định các chỉ dẫn phủ định. Việc bịa chữ là đặc tính của Vintern khi trong khung hình
+có chữ, không phải lỗi của prompt.
+
+→ **Không rút ngắn. Giữ nguyên prompt gốc.** Câu trả lời ngắn hơn ở đây không hiệu quả hơn,
+chỉ kém hữu ích hơn.
+
+Lưu ý: cả ba ảnh thử nghiệm đều là cảnh "người ngồi ở bàn". Ảnh thực tế khi đeo thiết bị — đi
+lại, cửa ra vào, biển báo — có thể cho kết quả khác và cần thử lại khi có dữ liệu.
+
+##### 4.2.11.1. Ép Output Tiếng Việt
+
+Với câu hỏi rỗng hoặc vô nghĩa (ví dụ STT chỉ trả về `"rồi"`), model rơi sang **tiếng Anh** —
+đo được 5/10 trên các input suy biến, gồm cả những câu từ chối như *"I'm unable to provide a
+detailed description of the image."* Bốn cách khắc phục được thử trên đúng 10 input đó:
+
+| Cách | Số lần trả lời tiếng Anh |
+|------|--------------------------|
+| Nguyên bản | 5/10 |
+| System message (`Luôn trả lời bằng tiếng Việt`) | 3/10 |
+| **Hậu tố prompt `" Trả lời bằng tiếng Việt."`** | **0/10** |
+| System message + hậu tố | 0/10 |
+
+Chỉ dùng system message là chưa đủ — model 1B không coi trọng vai trò system. Chỉ dẫn gắn trực
+tiếp vào prompt người dùng mới có tác dụng. Hậu tố này giờ được thêm vào mọi prompt `/vlm`
+(`VLM_LANG_SUFFIX`).
+
+Chi phí: prefill và tốc độ decode không đổi (~8 token thêm nằm trong batch prefill 256 token của
+ảnh). Độ chính xác không đổi — vẫn nhận đúng các vật thể, và việc bịa tiêu đề slide vẫn y nguyên.
+Câu trả lời hơi dài hơn (~+20 token trung bình, dao động lớn). Nó không sửa độ chính xác, chỉ
+sửa ngôn ngữ.
+
+---
+
 ## 5. Tối Ưu Hóa Hệ Thống
 
 ### 5.1. Thread Affinity
@@ -475,7 +729,7 @@ Mixing performance và efficiency cores trong cùng thread pool tạo stall barr
 
 **Vấn đề phát sinh với process-level pinning:**
 
-Pinning toàn bộ process vào performance cores khiến uvicorn/FastAPI threads cũng bị giới hạn, cạnh tranh với inference threads → pipeline tổng thể ≥22s (tệ hơn không pin <22s).
+Pinning toàn bộ process vào performance cores khiến uvicorn/FastAPI threads cũng bị giới hạn, cạnh tranh với inference threads → pipeline tổng thể ≥22s, tệ hơn khi không pin (<22s) tại thời điểm đo. Tổng thời gian tuyệt đối thay đổi theo độ dài câu trả lời, nên đây chỉ là so sánh tương đối — xem 5.2 cho số liệu end-to-end hiện tại.
 
 **Giải pháp:** Pin affinity trước khi load models để inference thread pools kế thừa mask, sau đó restore affinity trước khi uvicorn nhận request:
 
@@ -487,7 +741,79 @@ models["tts"] = TTSPipeline()
 os.sched_setaffinity(0, set(range(8)))  # restore cho uvicorn
 ```
 
-Xác nhận: 9 inference threads → `[4,5,6,7]`, uvicorn threads → `[0-7]`.
+Xác nhận trên server đang chạy (tổng cộng 41 threads):
+
+| Số threads | Affinity | Nguồn |
+|------------|----------|-------|
+| 9 | `[4,5,6,7]` | Thread pool inference của llama.cpp — kế thừa mask đúng như thiết kế |
+| 18 | `[0-7]` | uvicorn / FastAPI / asyncio — đã restore, đúng như thiết kế |
+| 14 | mỗi thread một core, trải trên `[1-7]` | onnxruntime (STT sherpa-onnx + các session TTS) |
+
+Nhóm cuối là ngoại lệ: onnxruntime tự pin intra-op threads của nó và bỏ qua mask kế thừa, nên một số rơi vào efficiency cores `[1,2,3]`. Chúng chỉ hoạt động trong giai đoạn STT và codec rất ngắn, không chạy trong lúc VLM decode, nên được giữ nguyên — việc pinning vẫn đạt mục tiêu cho giai đoạn chiếm phần lớn độ trễ.
+
+Chỉ pin lúc load model là chưa đủ với onnxruntime, vì thread *gọi* cũng đóng vai trò một intra-op worker. Xem 3.2.4.3 cho phần pin theo từng request mà đường TTS cần đến.
+
+---
+
+### 5.2. Chạy Song Song Trong Pipeline
+
+Ba giai đoạn trước đây chạy tuần tự một cách không cần thiết. Cả ba đã được cho chồng lấn:
+
+**Chụp ảnh trong lúc ghi âm.** Việc chụp (khởi động gstreamer + ~2s để exposure ổn định) chạy
+trước khi mở micro, dù hai việc này độc lập nhau. Khung hình giờ được chụp trong một worker
+thread song song với lúc ghi câu hỏi, nên camera không tốn thêm thời gian với mọi cửa sổ ghi âm
+dài hơn ~2.5s.
+
+**Tổng hợp trước phát một câu.** Trước đây TTS phải tổng hợp toàn bộ câu trả lời rồi mới phát.
+Câu trả lời giờ được tách theo câu, câu N+1 được tổng hợp trong khi câu N đang phát, và tất cả
+các chunk được đưa vào một tiến trình `aplay` duy nhất đọc PCM thô từ stdin nên phát liền mạch.
+Thời gian tới âm thanh đầu tiên giảm từ **4.05-4.39s** (tổng hợp cả câu trả lời) xuống
+**1.1-2.7s** tùy độ dài câu đầu. Lợi ích tăng theo độ dài câu trả lời.
+
+**Server không còn bị chặn.** Các endpoint vốn là `async def` nhưng chạy inference chặn, làm
+đứng event loop của uvicorn suốt mỗi request — `/health` không thể trả lời khi VLM đang chạy.
+Giờ chúng là `def` đồng bộ nên FastAPI đẩy sang threadpool, kèm `INFERENCE_LOCK` để tuần tự hóa
+truy cập model (các model dùng chung 4 core; chạy song song chỉ gây tranh chấp). `/health` giờ
+trả lời trong 5-9ms ngay khi VLM đang chạy.
+
+Overhead còn lại ngoài model: ~10ms tiền xử lý ảnh, ~5ms HTTP.
+
+### 5.3. Độ Trễ End-to-End
+
+Pipeline đầy đủ, trạng thái warm, chạy `pipeline.py` với câu hỏi WAV và ảnh demo (thu nhỏ còn 960×720):
+
+| Giai đoạn | Thời gian |
+|-----------|-----------|
+| STT | 0.15s |
+| VLM | 17-21s |
+| TTS chunk đầu | 1.1-2.7s |
+| **Thời gian tới âm thanh đầu tiên** | **~20s** |
+| **Tổng** | **~24-26s** |
+
+Với phần cứng thật, camera được giấu trong cửa sổ ghi âm và độ dài câu hỏi do người dùng quyết
+định, nên tổng thời gian trở thành `record_seconds + ~21s`. Câu trả lời dài hơn tốn thêm thời
+gian ở cả VLM decode lẫn TTS. Lần chạy đầu sau khi khởi động server chậm hơn — STT và các session
+codec cần warm up. Từ lúc khởi động server tới khi phục vụ được request đầu tiên là **12.9s**
+với page cache đang nóng.
+
+### 5.4. Hành Vi Nhiệt
+
+Khi chạy inference liên tục, SoC ở mức **82-89°C** (các số đo 46-49°C lúc nhàn rỗi không phản
+ánh đúng thực tế). Thời gian encode tăng dần từ lúc khởi động nguội rồi đi ngang:
+
+| Số request | Thời gian encode |
+|------------|------------------|
+| 1 | 13.3s |
+| 5 | 14.8s |
+| 10 | 15.2s |
+| 15-20 | **15.3s** (đi ngang, ±0.05s) |
+
+Thiết bị không chậm đi liên tục — nó ổn định ở mức cao hơn khởi động nguội ~2s rồi giữ nguyên.
+Tần số CPU xác nhận cơ chế: cpu7 giữ 2707MHz trong khoảng chục request đầu, sau đó tụt xuống
+2208, 2515 và hai lần xuống **2035MHz** — giảm 25% xung nhịp khi throttling kích hoạt.
+
+Số liệu này đo trên bàn thoáng. Khi đặt trong vỏ máy đeo sát người, throttling sẽ đến sớm hơn và
+sâu hơn; không nên giả định các con số ở đây vẫn đúng.
 
 ---
 
@@ -498,13 +824,16 @@ Xác nhận: 9 inference threads → `[4,5,6,7]`, uvicorn threads → `[0-7]`.
 
 | Thành phần | Model | Params | Quantization | Runtime | Hiệu Năng |
 |------------|-------|--------|--------------|---------|-----------|
-| STT | ZipFormer-30M RNNT | ~30M | int8 | sherpa-onnx | ~0.07-0.17s latency, RTF <0.1x |
-| TTS | VieNeu-TTS-v2-Turbo | ~111M | Q4_K_M | llama-cpp-python + VieNeu-Codec ONNX | ~4-5s latency |
-| VLM | Vintern-1B-v3_5 | ~1B | Q4_K_M | llama-cpp-python 0.3.16 | ~2.8-3.0 tok/s, ~18-22s/ảnh |
+| STT | ZipFormer-30M RNNT | ~30M | int8 | sherpa-onnx | 0.05-0.11s latency, RTF 0.03-0.07x |
+| TTS | VieNeu-TTS-v3-Turbo | ~0.1B | int8 | onnxruntime 1.24.4 | RTF 0.80-0.97x (~3.5s mỗi câu trả lời), 48 kHz |
+| VLM | Vintern-1B-v3_5 | ~1B | Q4_K_M | llama-cpp-python 0.3.16 | 17-21s/ảnh (3.0-3.7 tok/s báo cáo) |
+
+End-to-end: ~24-26s cho mỗi câu hỏi, âm thanh đầu tiên phát ở ~20s (5.3). Khi chạy liên tục,
+thời gian encode ảnh ổn định ở mức cao hơn ~2s do SoC bị throttle (5.4).
 
 ### 6.2. Giới Hạn Hiện Tại
 
-~2.8-3.0 tok/s là ngưỡng trần inference cho VLM 1B với cấu hình phần mềm hiện tại. Các hướng tăng tốc đã khảo sát:
+17-21s mỗi ảnh là ngưỡng trần cho VLM 1B với cấu hình phần mềm hiện tại, và ~16-18s trong số đó là chi phí cố định để encode + prefill ảnh chứ không phải sinh token. Các hướng tăng tốc đã khảo sát:
 
 | Hướng | Trạng thái | Lý do |
 |-------|-----------|-------|

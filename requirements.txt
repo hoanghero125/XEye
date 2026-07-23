@@ -5,13 +5,22 @@ requests
 huggingface_hub
 
 # STT
-sherpa-onnx
+sherpa-onnx==1.13.2
 
-# VLM
-llama-cpp-python
+# VLM — PIN IS LOAD-BEARING, do not bump. 0.3.16's Llava15ChatHandler encodes one 448px
+# tile per image (~12s). Upstream master applies InternVL's 4-tile preprocessing instead,
+# measured at ~52s+13s for the same photo — 4x slower. See docs technical report 4.2.10.
+llama-cpp-python==0.3.16
 
-# TTS
-vieneu
+# TTS — vieneu is installed with --no-deps by setup.sh (its declared deps pull in
+# gradio, which the board does not need); these are its actual runtime requirements.
+onnxruntime>=1.20.0
+sea-g2p>=0.7.20
+perth
+soundfile
+soxr
+tokenizers>=0.20
+PyYAML
 
 # API server
 fastapi

@@ -1,13 +1,13 @@
 import base64
 import io
 import os
+import threading
 import time
 import wave
 
-# os.sched_setaffinity(0, {4, 5, 6, 7})  # pin to perf cores (A78+X1, cpu4-7 on QCS6490)
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import numpy as np
 import sherpa_onnx
@@ -56,10 +56,37 @@ VINTERN_MODEL  = VINTERN_DIR / "vintern-1b-v3_5-q4_k_m.gguf"
 VINTERN_MMPROJ = VINTERN_DIR / "mmproj-vintern-1b-v3_5-f16.gguf"
 
 STT_SAMPLE_RATE = 16000
-TTS_SAMPLE_RATE = 24000
+TTS_SAMPLE_RATE = 48000
 MAX_NEW_TOKENS  = 128
 
 VLM_DEFAULT_PROMPT = "Mô tả những gì bạn thấy."
+# Vintern falls back to English on empty/nonsense questions (measured 5/10 of the time).
+# Appending this to every prompt forces Vietnamese — a system message alone was not enough
+# for a 1B model; the instruction beside the question is what holds (measured 10/10 VI).
+VLM_LANG_SUFFIX = " Trả lời bằng tiếng Việt."
+# llama-cpp-python defaults this to 1.0 (disabled), which lets the model fall into
+# repetition loops that run to the token cap. llama.cpp's own default is 1.1.
+VLM_REPEAT_PENALTY = float(os.getenv("XEYE_VLM_REPEAT_PENALTY", "1.1"))
+
+TTS_DEFAULT_VOICE = "Mai Anh"
+TTS_STYLE         = "tu_nhien"  # pinned: preset styles (tin_tuc/doc_truyen) pause mid-sentence
+
+PERF_CORES = {4, 5, 6, 7}  # A78 ×3 + X1, cpu4-7 on QCS6490
+
+
+@contextmanager
+def perf_cores():
+    """Pin the calling thread to the performance cores.
+
+    ONNX Runtime uses the calling thread as one of its intra-op workers, so a request
+    served on an unpinned uvicorn thread can land on an A55 and stall the whole op.
+    """
+    prev = os.sched_getaffinity(0)
+    os.sched_setaffinity(0, PERF_CORES)
+    try:
+        yield
+    finally:
+        os.sched_setaffinity(0, prev)
 
 
 # ── STT ──────────────────────────────────────────────────────────────────────
@@ -127,6 +154,7 @@ class VLMPipeline:
                 ],
             }],
             max_tokens=MAX_NEW_TOKENS,
+            repeat_penalty=VLM_REPEAT_PENALTY,
         )
         text    = resp["choices"][0]["message"]["content"].strip()
         elapsed = time.time() - t0
@@ -140,23 +168,23 @@ class VLMPipeline:
 
 class TTSPipeline:
     def __init__(self):
-        print("[TTS] Loading VieNeu-TTS-v2-Turbo GGUF + VieNeu-Codec ONNX ...")
+        print("[TTS] Loading VieNeu-TTS-v3-Turbo (ONNX int8) ...")
         from vieneu import Vieneu
-        self.tts = Vieneu(mode="turbo", device="cpu", n_threads=4)
-        print(f"[TTS] Voices: {list(self.tts._preset_voices.keys())}")
+        # threads=2 measured fastest in-server: v3 builds ~8 ONNX sessions and 4 intra-op
+        # threads each oversubscribes the 4 performance cores (9.5s vs 10.9s on a 203-char text).
+        self.tts = Vieneu(mode="v3turbo", device="cpu", threads=2)
+        self.voices = [vid for _, vid in self.tts.list_preset_voices()]
+        print(f"[TTS] Voices: {self.voices}")
         print("[TTS] Ready.\n")
 
-    def _get_voice(self, name: Optional[str]) -> Optional[Any]:
-        if name is None:
-            return None
-        v = self.tts._preset_voices.get(name)
-        if v is None:
-            raise ValueError(f"Unknown voice '{name}'. Available: {list(self.tts._preset_voices.keys())}")
-        return v
+    def synthesize(self, text: str, voice: Optional[str] = TTS_DEFAULT_VOICE) -> np.ndarray:
+        name = voice or TTS_DEFAULT_VOICE
+        if name not in self.voices:
+            raise ValueError(f"Unknown voice '{name}'. Available: {self.voices}")
 
-    def synthesize(self, text: str, voice: Optional[str] = "Bích Ngọc (Nữ - Miền Bắc)") -> np.ndarray:
         t0 = time.time()
-        audio = self.tts.infer(text, voice=self._get_voice(voice))
+        with perf_cores():
+            audio = self.tts.infer(text, voice=name, style=TTS_STYLE, apply_watermark=False)
         elapsed = time.time() - t0
         audio_sec = len(audio) / TTS_SAMPLE_RATE
         print(f"[TTS] {len(text)} chars → {audio_sec:.1f}s audio in {elapsed:.1f}s (RTF {elapsed/audio_sec:.2f}x)")
@@ -167,11 +195,16 @@ class TTSPipeline:
 
 models: dict = {}
 
+# Endpoints are sync `def`, so FastAPI runs them in its threadpool and the event loop stays
+# free (/health answers during inference). The lock keeps the models single-consumer — they
+# share the same 4 performance cores, so parallel requests would only thrash.
+INFERENCE_LOCK = threading.Lock()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("[server] Loading models ...")
-    os.sched_setaffinity(0, {4, 5, 6, 7})  # inference threads inherit perf cores
+    os.sched_setaffinity(0, PERF_CORES)  # inference threads inherit perf cores
     models["stt"] = STTPipeline()
     models["vlm"] = VLMPipeline()
     models["tts"] = TTSPipeline()
@@ -190,39 +223,42 @@ def health():
 
 
 @app.post("/stt")
-async def stt(audio: UploadFile = File(...)):
+def stt(audio: UploadFile = File(...)):
     """WAV audio → Vietnamese text."""
-    data = await audio.read()
+    data = audio.file.read()
     with wave.open(io.BytesIO(data), "rb") as wf:
         sr  = wf.getframerate()
         raw = wf.readframes(wf.getnframes())
     pcm = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-    text = models["stt"].transcribe(pcm, sample_rate=sr)
+    with INFERENCE_LOCK:
+        text = models["stt"].transcribe(pcm, sample_rate=sr)
     return {"text": text}
 
 
 @app.post("/vlm")
-async def vlm(
+def vlm(
     image:    UploadFile = File(...),
     question: str        = Form(default=""),
 ):
     """Image + Vietnamese question → Vietnamese answer."""
-    data = await image.read()
+    data = image.file.read()
     img  = Image.open(io.BytesIO(data)).convert("RGB")
     img.thumbnail((1280, 720))
 
-    prompt                    = question.strip() if question.strip() else VLM_DEFAULT_PROMPT
-    vi_text, n_tok, elapsed, tok_s = models["vlm"].describe(img, prompt)
+    prompt = (question.strip() or VLM_DEFAULT_PROMPT) + VLM_LANG_SUFFIX
+    with INFERENCE_LOCK:
+        vi_text, n_tok, elapsed, tok_s = models["vlm"].describe(img, prompt)
     return {"vi": vi_text, "tokens": n_tok, "elapsed_s": elapsed, "tok_s": tok_s}
 
 
 @app.post("/tts")
-async def tts(
+def tts(
     text:  str = Form(...),
-    voice: str = Form(default="Bích Ngọc (Nữ - Miền Bắc)"),
+    voice: str = Form(default=TTS_DEFAULT_VOICE),
 ):
     """Vietnamese text → WAV audio bytes."""
-    audio = models["tts"].synthesize(text, voice=voice)
+    with INFERENCE_LOCK:
+        audio = models["tts"].synthesize(text, voice=voice)
     pcm   = (audio * 32767).clip(-32768, 32767).astype(np.int16)
 
     buf = io.BytesIO()

@@ -1,13 +1,17 @@
 # Technical Report: XEye
 
-**Last updated:** 25/05/2026 
+**Last updated:** 24/07/2026 
 **Author:** Do Pham Bao Hoang
+
+All performance figures in this report were measured on the running server on 23-24/07/2026 (RUBIK Pi 3, warm — the first request after startup is slower).
 
 ---
 
 ## Table of Contents
 
 - [1. System Information](#1-system-information)
+  - [1.1. Hardware](#11-hardware)
+  - [1.2. Software](#12-software)
 - [2. Speech-to-Text (STT)](#2-speech-to-text-stt)
   - [2.1. Model Used](#21-model-used)
 - [3. Text-to-Speech (TTS)](#3-text-to-speech-tts)
@@ -16,6 +20,7 @@
     - [3.2.1. Experiment 1](#321-experiment-1)
     - [3.2.2. Experiment 2: Finding a Better Model](#322-experiment-2-finding-a-better-model)
     - [3.2.3. Experiment 3: Optimization](#323-experiment-3-optimization)
+    - [3.2.4. Experiment 4: Migration to v3 Turbo](#324-experiment-4-migration-to-v3-turbo)
 - [4. Vision-Language Model (VLM)](#4-vision-language-model-vlm)
   - [4.1. Model Used](#41-model-used)
   - [4.2. Experiment History](#42-experiment-history)
@@ -28,8 +33,13 @@
     - [4.2.7. Experiment 7: Better Model](#427-experiment-7-better-model)
     - [4.2.8. Experiment 8: Vintern-1B](#428-experiment-8-vintern-1b)
     - [4.2.9. Experiment 9: GPU Vulkan Offload](#429-experiment-9-gpu-vulkan-offload)
+    - [4.2.10. Experiment 10: Speed Ceiling Investigation](#4210-experiment-10-speed-ceiling-investigation)
+    - [4.2.11. Experiment 11: Prompt Length Tuning](#4211-experiment-11-prompt-length-tuning)
 - [5. System Optimization](#5-system-optimization)
   - [5.1. Thread Affinity](#51-thread-affinity)
+  - [5.2. Pipeline Concurrency](#52-pipeline-concurrency)
+  - [5.3. End-to-End Latency](#53-end-to-end-latency)
+  - [5.4. Thermal Behaviour](#54-thermal-behaviour)
 - [6. Summary](#6-summary)
   - [6.1. Selected Models](#61-selected-models)
   - [6.2. Current Limitations](#62-current-limitations)
@@ -37,6 +47,8 @@
 ---
 
 ## 1. System Information
+
+### 1.1. Hardware
 
 | Component | Specification |
 |-----------|---------------|
@@ -46,7 +58,23 @@
 | CPU | 4× Cortex-A55 @1.96GHz + 3× Cortex-A78 @2.40GHz + 1× Cortex-X1 @2.71GHz |
 | GPU | Adreno 643 |
 | NPU | Hexagon 780 (V73), 12 TOPS |
+| Camera | Raspberry Pi Camera Module 2 (IMX219) on CSI connector 1, captured via GStreamer `qtiqmmfsrc` at 1280×720 NV12. Board requires a 22-pin 0.5mm FPC; standard variant only (no NoIR/wide-angle) |
+| Audio | Seeed Studio ReSpeaker Lite (USB) — mic array in, speaker out |
 | OS | Ubuntu (Linux 6.8.0-1071-qcom) |
+
+### 1.2. Software
+
+Versions the measurements in this report were taken with. The three inference runtimes are pinned in `requirements.txt`; the remaining dependencies (FastAPI, uvicorn, numpy, Pillow) are unpinned and may resolve to newer versions.
+
+| Package | Version |
+|---------|---------|
+| Python | 3.11.15 |
+| llama-cpp-python | 0.3.16 (VLM only) |
+| sherpa-onnx | 1.13.2 |
+| vieneu | 3.2.3 (installed `--no-deps`) |
+| onnxruntime | 1.24.4 |
+| sea-g2p / perth | 0.7.20 / 1.0.0 |
+| FastAPI / uvicorn | 0.136.1 / 0.47.0 |
 
 ---
 
@@ -68,10 +96,13 @@
 
 #### 2.1.2. Performance
 
+Measured on a 1.8s Vietnamese utterance.
+
 | Metric | Value |
 |--------|-------|
-| Latency (short utterance) | 0.07-0.17s |
-| RTF | <0.1x |
+| Decode latency (warm) | 0.05-0.11s |
+| RTF (warm) | 0.03-0.07x |
+| Decode latency (first request after startup) | ~0.9s |
 
 ---
 
@@ -83,30 +114,55 @@
 
 | Attribute | Value |
 |-----------|-------|
-| Model | VieNeu-TTS-v2-Turbo |
-| Params | ~111M |
-| Quantization | Q4_K_M |
-| Format | GGUF |
-| Codec | VieNeu-Codec (encoder + decoder ONNX) |
-| Voice Format | 128-dim speaker embedding |
-| Threads | 4 |
-| Sample Rate | 24000 Hz |
+| Model | VieNeu-TTS-v3-Turbo |
+| Params | ~0.1B |
+| Quantization | int8 |
+| Format | ONNX (`onnx_int8/` graphs) |
+| Runtime | onnxruntime (torch-free CPU engine) |
+| Codec | MOSS-Audio-Tokenizer-Nano ONNX |
+| Voice Format | 192-dim speaker embedding + pre-encoded reference codes |
+| Threads | 2 (intra-op) |
+| Style | `tu_nhien`, pinned for every voice |
+| Watermark | disabled |
+| Sample Rate | 48000 Hz |
 
 #### 3.1.2. Available Voices
 
-| Name | Gender | Dialect |
-|------|--------|---------|
-| Bích Ngọc | Female | Northern |
-| Phạm Tuyên | Male | Northern |
-| Thục Đoan | Female | Southern |
-| Xuân Vĩnh | Male | Southern |
+14 presets — 7 female, 7 male, across all three dialects. Voice cloning from a 3-5s reference
+clip is supported by the model but not exposed through the XEye API.
+
+| Name | Gender | Dialect | Preset style |
+|------|--------|---------|--------------|
+| Mai Anh | Female | Northern | tin_tuc **(XEye default)** |
+| Trúc Ly | Female | Northern | tu_nhien |
+| Đoan Trang | Female | Northern | tu_nhien |
+| Ngọc Linh | Female | Northern | doc_truyen |
+| Phạm Tuyên | Male | Northern | tu_nhien |
+| Thanh Bình | Male | Northern | doc_truyen |
+| Minh Đức | Male | Northern | tin_tuc |
+| Thục Đoan | Female | Southern | doc_truyen |
+| Thùy Dung | Female | Southern | tin_tuc |
+| Xuân Vĩnh | Male | Southern | tu_nhien |
+| Thái Sơn | Male | Southern | doc_truyen |
+| Minh Triết | Male | Southern | tin_tuc |
+| Ngọc Trân | Female | Central | tu_nhien |
+| Quang Sơn | Male | Central | tu_nhien |
+
+XEye overrides every voice's preset style with `tu_nhien`. The `tin_tuc` (news-reader) and
+`doc_truyen` (storytelling) styles insert mid-sentence pauses: on a one-sentence answer,
+`Mai Anh` at `tin_tuc` produces a 280ms mid-sentence break, versus **zero pauses** at
+`tu_nhien` for the same synthesis time.
 
 #### 3.1.3. Performance
 
-| Metric | Value |
-|--------|-------|
-| Latency (short text) | ~4-5s |
-| Speed vs. Standard | ~2x |
+Measured through the running server. Synthesis time scales with text length; RTF is roughly
+stable, degrading slightly on long input.
+
+| Input | Audio produced | Synthesis time | RTF |
+|-------|----------------|----------------|-----|
+| 8 chars | 0.8s | 0.6-0.7s | 0.80-0.84x |
+| 83 chars (typical VLM answer) | 3.9-4.6s | 3.3-4.0s | 0.84-0.87x |
+| 203 chars | 9.8-10.6s | 9.1-10.2s | 0.93-0.97x |
 
 ---
 
@@ -165,7 +221,62 @@ Acceptable latency, but speed can be further optimized.
 
 ##### 3.2.3.2. Results
 
-~2x faster.
+~2x faster. Shipped until the v3 migration below.
+
+---
+
+#### 3.2.4. Experiment 4: Migration to v3 Turbo
+
+v3 Turbo was released as a from-scratch model (~10k hours EN-VI), not a fine-tune of v2. It
+publishes no GGUF — on CPU the `vieneu` package runs a torch-free ONNX Runtime engine, so the
+llama.cpp path used for v2 became the library's `legacy` extra.
+
+##### 3.2.4.1. Comparison
+
+Both measured on this board, same texts, warm:
+
+| | v2-Turbo | v3-Turbo |
+|---|---|---|
+| Runtime | llama-cpp-python + VieNeu-Codec | onnxruntime int8 |
+| Sample rate | 24 kHz | 48 kHz |
+| 8 chars | 0.7s | 0.6-0.7s |
+| 83 chars | 3.2s | 3.3-4.0s |
+| 203 chars | 8.5s | 9.1-10.2s |
+| Peak RSS (standalone) | 3293 MB | 1385 MB |
+| Disk footprint | 655 MB | 286 MB |
+| Voices | 4 | 14 + cloning |
+
+Speed is roughly at parity for typical answer lengths and ~10-20% slower on long input, in
+exchange for double the sample rate, 58% less peak memory and 56% less disk.
+
+##### 3.2.4.2. Issue: Thread Oversubscription
+
+v3 builds ~8 ONNX sessions. Carrying over v2's `threads=4` oversubscribed the 4 performance
+cores once all three models shared the process:
+
+| Intra-op threads | Median (203 chars, in-server) |
+|------------------|-------------------------------|
+| 1 | 12.1-12.8s |
+| **2** | **9.5s** |
+| 3 | 10.5s |
+| 4 | 10.9s |
+
+→ Fix: `threads=2`. Note the optimum is context-dependent — measured standalone, with nothing
+else resident, `threads=4` is instead the fastest (~8.6s).
+
+##### 3.2.4.3. Issue: Calling Thread Stalls the Op
+
+ONNX Runtime uses the *calling* thread as one of its intra-op workers. Requests are served on
+uvicorn threads, which are deliberately unpinned to `[0-7]` after model load (5.1), so the
+calling thread could land on an A55 efficiency core and stall the whole operation — 12.6-18.3s
+on a 203-char text, with high variance.
+
+→ Fix: a `perf_cores()` context manager in `server.py` pins the calling thread to `{4,5,6,7}`
+for the duration of `infer()`, restoring the previous mask afterwards.
+
+##### 3.2.4.4. Results
+
+Migrated. 48 kHz output, 14 voices, less than half the peak memory of v2.
 
 ---
 
@@ -185,13 +296,32 @@ Acceptable latency, but speed can be further optimized.
 | Runtime | llama-cpp-python 0.3.16 |
 | Threads | 4 |
 | Context | 2048 |
+| Max new tokens | 128 |
+| Repeat penalty | 1.1 |
+
+`llama-cpp-python` defaults `repeat_penalty` to 1.0 — disabled — where llama.cpp's own default
+is 1.1. Left at 1.0, the model occasionally falls into a repetition loop that runs to the token
+cap: one run in ten produced `"... giá cả - Giá cả - Giá cả - Giá cả"`. Measured cost of the
+penalty is **2 ms/token** (47 → 49 ms/token), or ~0.1s on a 60-token answer.
 
 #### 4.1.2. Performance
 
-| Metric | Value |
-|--------|-------|
-| Throughput | ~2.8-3.0 tok/s |
-| Language | Vietnamese |
+Measured on the demo photo — 2568×1926, downscaled by the server to 960×720 (every input is fitted into a 1280×720 box).
+
+| Stage | Time |
+|-------|------|
+| Image encode (mmproj/clip) | 12.5-13.9s |
+| Image prefill (256 image tokens) | 3.8-3.9s |
+| **Total per image** | **17-21s** |
+
+The image cost is fixed per request and dominates: ~16-18s elapses before the first text token. The `tok_s` value the server reports is `completion_tokens ÷ total elapsed`, so it rises with answer length rather than describing a decode rate:
+
+| Answer length | Reported throughput |
+|---------------|---------------------|
+| 58-75 tokens (full description, default prompt) | 3.0-3.7 tok/s |
+| 17-29 tokens (short answer to a specific question) | 1.0-1.7 tok/s |
+
+Output language: Vietnamese.
 
 ---
 
@@ -402,7 +532,7 @@ Tried folding `DequantizeLinear` nodes with constant inputs to reduce their coun
 | Attribute | Value |
 |-----------|-------|
 | Model | Vintern-1B-v3_5 (InternVL2.5-1B fine-tuned Vietnamese) |
-| Backbone | ~462MB |
+| Backbone | ~491MB |
 | Quantization | Q4_K_M |
 | Format | GGUF |
 | mmproj | ~620MB, F16 |
@@ -416,23 +546,37 @@ Fix: subclassed `Llava15ChatHandler` — image injection occurs at C-level, over
 
 ```python
 class InternVL2ChatHandler(Llava15ChatHandler):
+    """Llava15ChatHandler image injection + InternVL2 ChatML prompt format."""
     DEFAULT_SYSTEM_MESSAGE = None
     CHAT_FORMAT = (
         "{% for message in messages %}"
+        "{% if message.role == 'system' %}"
+        "<|im_start|>system\n{{ message.content }}<|im_end|>\n"
+        "{% endif %}"
         "{% if message.role == 'user' %}"
         "<|im_start|>user\n"
+        "{% if message.content is iterable and message.content is not string %}"
         "{% for content in message.content %}"
-        "{% if content.type == 'image_url' %}{{ content.image_url.url }}\n{% endif %}"
+        "{% if content.type == 'image_url' %}"
+        "{% if content.image_url is string %}{{ content.image_url }}\n{% endif %}"
+        "{% if content.image_url is mapping %}{{ content.image_url.url }}\n{% endif %}"
+        "{% endif %}"
         "{% endfor %}"
         "{% for content in message.content %}"
         "{% if content.type == 'text' %}{{ content.text }}{% endif %}"
         "{% endfor %}"
+        "{% else %}{{ message.content }}{% endif %}"
         "<|im_end|>\n"
+        "{% endif %}"
+        "{% if message.role == 'assistant' %}"
+        "<|im_start|>assistant\n{{ message.content }}<|im_end|>\n"
         "{% endif %}"
         "{% endfor %}"
         "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
     )
 ```
+
+The template also covers system and assistant turns, plain-string content, and both string and mapping forms of `image_url`, since llama-cpp-python can hand over any of them.
 
 mmproj F16 ~620MB is the correct size — InternViT-300M × 2 bytes/param ≈ 600MB.
 
@@ -467,6 +611,117 @@ Turnip does not support compute shaders with workgroup barriers — required for
 
 ---
 
+#### 4.2.10. Experiment 10: Speed Ceiling Investigation
+
+Quality at Vintern-1B-v3_5 was judged sufficient, so this pass looked only for latency wins
+that preserve it. The image path costs ~16s of every request (12-13s encode + ~4s prefill),
+so that was the target.
+
+##### 4.2.10.1. Is the Encoder Compute-Bound?
+
+| Cores | Threads | Median (encode + prefill) |
+|-------|---------|---------------------------|
+| `{4,5,6,7}` | 4 | **19.02s** |
+| all 8 | 8 | 19.20s |
+| all 8 | 6 | 19.29s |
+| `{4,5,6,7}` | 3 | 21.84s |
+
+Doubling the core count changes nothing; dropping below 4 hurts. Input resolution is equally
+inert — 960×720, 448×448 and 224×224 encode in 12.4s, 13.2s and 13.7s respectively, because
+the model always processes one fixed 448px tile.
+
+##### 4.2.10.2. mmproj F16 → Q8_0
+
+The F16 projector is 592MB, the largest single artifact in the image path. Requantizing its
+146 2D weight tensors to Q8_0 (318MB) was expected to cut memory traffic.
+
+| mmproj | Size | Encode + prefill |
+|--------|------|------------------|
+| **F16** | 592MB | **18.85s** |
+| Q8_0 | 318MB | 20.84s |
+
+→ **Rejected: 10% slower.** Output quality was unchanged. The CPU exposes `asimdhp` (native
+FP16) but not `i8mm` or SVE, so the F16 kernels are already well matched to the hardware while
+Q8_0 adds dequantization overhead with no int8 matmul path to recover it.
+
+Note `llama-quantize` cannot do this — it rejects architecture `clip`. The file was produced
+by requantizing tensors directly through `gguf-py`.
+
+##### 4.2.10.3. Upstream llama.cpp
+
+Built `llama-mtmd-cli` from master and ran the same photo: master applies InternVL's dynamic
+**4-tile** preprocessing, encoding in 52s + 13s versus 12-13s on the pinned version.
+`--image-max-tokens` does not override it.
+
+→ **The `llama-cpp-python==0.3.16` pin is load-bearing.** Current latency exists because that
+version's `Llava15ChatHandler` encodes a single tile. Bumping it quadruples VLM latency.
+The corollary is that XEye runs the model at lower effective resolution than upstream intends —
+a deliberate quality-for-speed trade.
+
+##### 4.2.10.4. Results
+
+No lever improved on the current configuration. 17-21s per image is the floor for this model
+on this hardware.
+
+---
+
+#### 4.2.11. Experiment 11: Prompt Length Tuning
+
+The VLM itself is a fixed ~20s, but answer length costs roughly **0.25s of interaction per
+token** (TTS synthesis plus the speech the user listens through). A 62-token answer spends
+32s of a 52s interaction on speaking alone, so terser prompts looked like free latency.
+
+Five prompt variants were run against three images (one text-heavy meeting room, two live
+camera frames), two runs each, and graded against the actual image content rather than by
+the model itself.
+
+| Prompt | Coverage on live scenes | Fabrication | Failure mode |
+|--------|-------------------------|-------------|--------------|
+| **Current** `Mô tả những gì bạn thấy.` | bottle, pink keyboard, headphones, window, phone | slide titles | one runaway to token cap |
+| `Chỉ nêu vật thể chính…` | person + desk only | invented "playing a game" | — |
+| `Có gì trước mặt tôi?` | **missed the person entirely** (2/2) | invented a slide title | — |
+| `Nêu ngắn gọn những người và vật thể chính` | person + phone | none | collapsed to 3 tokens once |
+| `Mô tả … trong hai câu ngắn.` | person + phone + headphones | said "computer" for a phone | — |
+
+The concise variants were 24s faster but only because they omitted the objects that make the
+device useful — a water bottle within reach, the keyboard, the window. They also still
+fabricated ("playing a game" when the subject was looking at a phone).
+
+Appending `Không đọc chữ.` ("do not read text") did **not** suppress the invented slide
+titles — a 1B model does not reliably follow negative instructions. The fabrication is a
+property of Vintern when text is in frame, not a prompt defect.
+
+→ **No change to length. The original prompt is retained.** Shorter answers are not more
+efficient here, they are less useful.
+
+Caveat: all three test images are "person at a desk" scenes. Real wearable imagery — walking,
+doorways, signage — may score differently and should be re-tested when available.
+
+##### 4.2.11.1. Forcing Vietnamese Output
+
+On empty or nonsense questions (e.g. STT returning just `"rồi"`), the model fell back to
+**English** — measured 5/10 across degenerate inputs, including outright refusals like
+*"I'm unable to provide a detailed description of the image."* Four fixes were tested against
+those 10 inputs:
+
+| Strategy | English replies |
+|----------|-----------------|
+| Baseline | 5/10 |
+| System message (`Luôn trả lời bằng tiếng Việt`) | 3/10 |
+| **Prompt suffix `" Trả lời bằng tiếng Việt."`** | **0/10** |
+| System message + suffix | 0/10 |
+
+A system message alone was insufficient — a 1B model does not weight the system role strongly.
+The instruction appended directly to the user prompt is what holds. The suffix is now added to
+every `/vlm` prompt (`VLM_LANG_SUFFIX`).
+
+Cost: prefill and decode rate are unchanged (~8 extra tokens ride in the 256-token image
+prefill batch). Answer correctness is unchanged — the same objects are identified, and the
+slide-title hallucination persists identically. Answers trend slightly longer (~+20 tokens on
+average, high variance). It does not fix accuracy, only language.
+
+---
+
 ## 5. System Optimization
 
 ### 5.1. Thread Affinity
@@ -475,7 +730,7 @@ Mixing performance and efficiency cores in the same thread pool creates stall ba
 
 **Issue with process-level pinning:**
 
-Pinning the entire process to performance cores restricts uvicorn/FastAPI threads too, competing with inference threads → total pipeline ≥22s (worse than unpinned <22s).
+Pinning the entire process to performance cores restricts uvicorn/FastAPI threads too, competing with inference threads → total pipeline ≥22s, worse than leaving it unpinned (<22s) as measured at the time. Absolute totals vary with answer length, so treat this as a relative comparison — see 5.2 for the current end-to-end figure.
 
 **Fix:** Pin affinity before model load so inference thread pools inherit the mask, then restore before uvicorn handles requests:
 
@@ -487,7 +742,78 @@ models["tts"] = TTSPipeline()
 os.sched_setaffinity(0, set(range(8)))  # restore for uvicorn
 ```
 
-Verified: 9 inference threads → `[4,5,6,7]`, uvicorn threads → `[0-7]`.
+Verified on the running server (41 threads total):
+
+| Threads | Affinity | Origin |
+|---------|----------|--------|
+| 9 | `[4,5,6,7]` | llama.cpp inference pools — inherited the mask as intended |
+| 18 | `[0-7]` | uvicorn / FastAPI / asyncio — restored, as intended |
+| 14 | one core each, spread over `[1-7]` | onnxruntime (sherpa-onnx STT + TTS sessions) |
+
+The last group is the exception: onnxruntime pins its own intra-op threads and ignores the inherited mask, so some land on efficiency cores `[1,2,3]`. They are only active during the short STT and codec stages, not during VLM decode, so this was left alone — the pinning does what it was intended to do for the stage that dominates latency.
+
+Load-time pinning is not sufficient on its own for onnxruntime, because the *calling* thread also acts as an intra-op worker. See 3.2.4.3 for the per-request pinning that the TTS path needs.
+
+---
+
+### 5.2. Pipeline Concurrency
+
+Three stages were serialized for no reason. All three were overlapped:
+
+**Camera capture during recording.** Capture (gstreamer startup + ~2s exposure settle) ran
+before the microphone opened, though the two are independent. The frame is now grabbed in a
+worker thread while the question is recorded, so the camera costs nothing for any recording
+window longer than ~2.5s.
+
+**Synthesis one sentence ahead of playback.** TTS previously rendered the whole answer before
+any sound played. The answer is now split into sentences, sentence N+1 renders while sentence N
+plays, and all chunks feed one `aplay` process reading raw PCM from stdin so playback is
+gapless. Time to first sound dropped from **4.05-4.39s** (whole-answer synthesis) to
+**1.1-2.7s** depending on the first sentence's length. The gain grows with answer length.
+
+**Non-blocking server.** The endpoints were `async def` performing blocking inference, which
+stalled the uvicorn event loop for the duration of every request — `/health` could not answer
+while the VLM was running. They are now sync `def`, so FastAPI dispatches them to its
+threadpool, with an `INFERENCE_LOCK` serializing model access (the models share 4 cores;
+parallel requests would only thrash). `/health` now responds in 5-9ms during a VLM request.
+
+Remaining overhead outside the models: ~10ms image preprocessing, ~5ms HTTP.
+
+### 5.3. End-to-End Latency
+
+Full pipeline, warm, `pipeline.py` with a WAV question and the demo photo (downscaled to 960×720):
+
+| Stage | Time |
+|-------|------|
+| STT | 0.15s |
+| VLM | 17-21s |
+| TTS first chunk | 1.1-2.7s |
+| **Time to first sound** | **~20s** |
+| **Total** | **~24-26s** |
+
+With live hardware, the camera is hidden inside the recording window and the question length is
+user-controlled, so the total becomes `record_seconds + ~21s`. Longer answers add time at both
+VLM decode and TTS. The first run after server startup is slower — STT and the codec sessions
+warm up on first use. Server startup to first servable request is **12.9s** with warm page cache.
+
+### 5.4. Thermal Behaviour
+
+Under sustained inference the SoC runs at **82-89°C** (idle readings of 46-49°C are not
+representative). Encode time rises from a cold start and then plateaus:
+
+| Requests | Encode time |
+|----------|-------------|
+| 1 | 13.3s |
+| 5 | 14.8s |
+| 10 | 15.2s |
+| 15-20 | **15.3s** (flat, ±0.05s) |
+
+The device does not degrade continuously — it settles ~2s above cold start and holds. CPU
+frequency confirms the mechanism: cpu7 holds 2707MHz for the first dozen requests, then drops
+to 2208, 2515 and twice to **2035MHz** — a 25% clock reduction as throttling engages.
+
+This was measured on an open desk. Inside an enclosure worn against the body, throttling will
+arrive sooner and cut deeper; the numbers here should not be assumed to transfer.
 
 ---
 
@@ -497,13 +823,16 @@ Verified: 9 inference threads → `[4,5,6,7]`, uvicorn threads → `[0-7]`.
 
 | Component | Model | Params | Quantization | Runtime | Performance |
 |-----------|-------|--------|--------------|---------|-------------|
-| STT | ZipFormer-30M RNNT | ~30M | int8 | sherpa-onnx | ~0.07-0.17s latency, RTF <0.1x |
-| TTS | VieNeu-TTS-v2-Turbo | ~111M | Q4_K_M | llama-cpp-python + VieNeu-Codec ONNX | ~4-5s latency |
-| VLM | Vintern-1B-v3_5 | ~1B | Q4_K_M | llama-cpp-python 0.3.16 | ~2.8-3.0 tok/s, ~18-22s/image |
+| STT | ZipFormer-30M RNNT | ~30M | int8 | sherpa-onnx | 0.05-0.11s latency, RTF 0.03-0.07x |
+| TTS | VieNeu-TTS-v3-Turbo | ~0.1B | int8 | onnxruntime 1.24.4 | RTF 0.80-0.97x (~3.5s per answer), 48 kHz |
+| VLM | Vintern-1B-v3_5 | ~1B | Q4_K_M | llama-cpp-python 0.3.16 | 17-21s/image (3.0-3.7 tok/s reported) |
+
+End-to-end: ~24-26s per question, with first sound at ~20s (5.3). Under sustained use the
+image encode settles ~2s higher as the SoC throttles (5.4).
 
 ### 6.2. Current Limitations
 
-~2.8-3.0 tok/s is the inference ceiling for a 1B VLM with current software configuration. Acceleration paths explored:
+17-21s per image is the ceiling for a 1B VLM with the current software configuration, and ~16-18s of that is the fixed image encode + prefill cost rather than token generation. Acceleration paths explored:
 
 | Approach | Status | Reason |
 |----------|--------|--------|

@@ -1,7 +1,7 @@
 # Models — download via download_models.py
 models/
 
-# llama.cpp — cloned and built locally by setup.sh
+# llama.cpp — local source checkout used for backend experiments
 llama.cpp/
 
 # Docs

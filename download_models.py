@@ -49,18 +49,32 @@ else:
     print("\n==> Downloading STT (ZipFormer-30M RNNT int8) ...")
     snapshot_download(repo_id="hynt/Zipformer-30M-RNNT-6000h", local_dir=stt_dir)
 
-# TTS — VieNeu-TTS-v2-Turbo + VieNeu-Codec
+# TTS — VieNeu-TTS-v3-Turbo (ONNX int8) + MOSS audio tokenizer
+# The vieneu package loads these from the HF cache, not from models/.
+V3_REPO   = "pnnbao-ump/VieNeu-TTS-v3-Turbo"
+MOSS_REPO = "OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX"
 tts_downloads = [
-    ("pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF", "vieneu-tts-v2-turbo.gguf"),
-    ("pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF", "voices.json"),
-    ("pnnbao-ump/VieNeu-Codec",              "vieneu_decoder.onnx"),
-    ("pnnbao-ump/VieNeu-Codec",              "vieneu_encoder.onnx"),
+    (V3_REPO,   "config.json"),
+    (V3_REPO,   "denoiser.onnx"),
+    (V3_REPO,   "onnx_int8/config.json"),
+    (V3_REPO,   "onnx_int8/tokenizer.json"),
+    (V3_REPO,   "onnx_int8/vieneu_prefill.onnx"),
+    (V3_REPO,   "onnx_int8/vieneu_decode_step.onnx"),
+    (V3_REPO,   "onnx_int8/vieneu_acoustic_cached.onnx"),
+    (V3_REPO,   "onnx_int8/vieneu_backbone_shared.data"),
+    (V3_REPO,   "onnx_int8/vieneu_v3_heads.npz"),
+    (MOSS_REPO, "codec_browser_onnx_meta.json"),
+    (MOSS_REPO, "moss_audio_tokenizer_encode.onnx"),
+    (MOSS_REPO, "moss_audio_tokenizer_encode.data"),
+    (MOSS_REPO, "moss_audio_tokenizer_decode_full.onnx"),
+    (MOSS_REPO, "moss_audio_tokenizer_decode_step.onnx"),
+    (MOSS_REPO, "moss_audio_tokenizer_decode_shared.data"),
 ]
 missing = [(r, f) for r, f in tts_downloads if not hf_cached(r, f)]
 if not missing:
     print("\n[skip] TTS — already cached.")
 else:
-    print("\n==> Downloading TTS (VieNeu-TTS-v2-Turbo + VieNeu-Codec) ...")
+    print("\n==> Downloading TTS (VieNeu-TTS-v3-Turbo ONNX int8 + MOSS tokenizer) ...")
     for repo_id, filename in missing:
         print(f"    {repo_id}/{filename}")
         hf_hub_download(repo_id=repo_id, filename=filename)

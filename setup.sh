@@ -15,11 +15,13 @@ fi
 echo "==> [2/3] Installing Python dependencies"
 $PIP install --upgrade pip wheel setuptools
 $PIP install -r "$ROOT/requirements.txt"
+# vieneu declares gradio as a hard dependency; the board only needs its ONNX runtime
+# path, so install it without deps (requirements.txt lists what it actually imports).
+$PIP install --no-deps vieneu==3.2.3
 
 echo "==> [3/3] Creating directories"
 mkdir -p "$ROOT/models/vintern"
 mkdir -p "$ROOT/models/stt"
-mkdir -p "$ROOT/models/tts"
 mkdir -p "$ROOT/data/audio"
 mkdir -p "$ROOT/data/images"
 
