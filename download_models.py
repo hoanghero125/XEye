@@ -1,5 +1,6 @@
 """Download all models. Run once — after this, the server works fully offline."""
 import os
+import urllib.request
 
 from huggingface_hub import snapshot_download, hf_hub_download
 
@@ -48,6 +49,18 @@ if all(os.path.isfile(os.path.join(stt_dir, f)) for f in stt_files):
 else:
     print("\n==> Downloading STT (ZipFormer-30M RNNT int8) ...")
     snapshot_download(repo_id="hynt/Zipformer-30M-RNNT-6000h", local_dir=stt_dir)
+
+# VAD — Silero VAD. Used by pipeline.py to end the recording when the speaker stops.
+# Not on HuggingFace: this is the copy sherpa-onnx's own examples pull.
+VAD_URL  = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+vad_dir  = os.path.join(ROOT, "models", "vad")
+vad_file = os.path.join(vad_dir, "silero_vad.onnx")
+if os.path.isfile(vad_file):
+    print("\n[skip] VAD — already downloaded.")
+else:
+    print("\n==> Downloading VAD (Silero VAD ONNX) ...")
+    os.makedirs(vad_dir, exist_ok=True)
+    urllib.request.urlretrieve(VAD_URL, vad_file)
 
 # TTS — VieNeu-TTS-v3-Turbo (ONNX int8) + MOSS audio tokenizer
 # The vieneu package loads these from the HF cache, not from models/.

@@ -15,6 +15,7 @@ All performance figures in this report were measured on the running server on 23
   - [1.3. Power](#13-power)
 - [2. Speech-to-Text (STT)](#2-speech-to-text-stt)
   - [2.1. Model Used](#21-model-used)
+  - [2.2. Voice Activity Detection (VAD)](#22-voice-activity-detection-vad)
 - [3. Text-to-Speech (TTS)](#3-text-to-speech-tts)
   - [3.1. Model Used](#31-model-used)
   - [3.2. Experiment History](#32-experiment-history)
@@ -145,6 +146,79 @@ Measured on a 1.8s Vietnamese utterance.
 | Decode latency (warm) | 0.05-0.11s |
 | RTF (warm) | 0.03-0.07x |
 | Decode latency (first request after startup) | ~0.9s |
+
+---
+
+### 2.2. Voice Activity Detection (VAD)
+
+Recording used to run for a fixed window — `arecord -d 5` — which always waited the full five
+seconds and cut off anyone still speaking at the end of it. A user who cannot see the device has
+no way to know when that window opened or closed. Silero VAD replaces it: the recording now ends
+when the speaker does, and only the trimmed speech segment reaches the STT model.
+
+#### 2.2.1. Configuration
+
+| Attribute | Value |
+|-----------|-------|
+| Model | Silero VAD |
+| Size | 629KB, fp32 ONNX |
+| Runtime | sherpa-onnx — already the STT runtime, so no new dependency |
+| Threads | 1 |
+| Cores | `{0,1,2,3}` — A55 efficiency cores |
+| Window size | 512 samples (32ms at 16kHz) |
+| Threshold | 0.5 |
+| Min speech duration | 0.25s |
+| Min silence duration | 0.8s |
+| Max speech duration | 8s |
+| Sample rate | 16000 Hz |
+
+VAD runs in `pipeline.py`, not in the server. The latency it saves comes from ending the recording
+early, and recording happens client-side; server-side VAD could trim a completed WAV but could not
+give back wall-clock already spent waiting.
+
+It is also the one component pinned to the *efficiency* cores, inverting 5.1. At 629KB an A55 keeps
+up with realtime comfortably, which leaves cpu4-7 to the camera during the question — and if
+listening ever becomes continuous, the efficiency cores are where it belongs.
+
+#### 2.2.2. Endpoint Threshold
+
+`min_silence_duration` is the parameter that matters. It is added to every query, because the
+recording always waits it out after speech stops. Silero defaults to 0.5s, tuned for conversational
+agents where turn latency is the product. XEye is not that system.
+
+The costs are asymmetric. Being too generous costs exactly the excess. Being too aggressive
+truncates the question — STT sees half of it, the VLM confidently answers the wrong thing, and the
+user waits out the full ~21s pipeline before discovering they have to ask again, losing ~25s.
+Against a cost of `d + p(truncation) × 25s`:
+
+| min_silence_duration | Truncation rate | Expected cost |
+|----------------------|-----------------|---------------|
+| 0.4s | 5% | 1.65s |
+| 0.7s | 1% | 0.95s |
+| **0.8s** | **~0.7%** | **0.98s** |
+| 1.0s | 0.3% | 1.08s |
+
+The curve is steep on the short side and nearly flat on the long side, so the setting errs long.
+0.8s also clears the range of normal between-clause pauses (300-600ms) while staying below a
+turn-final pause (700ms+) — which matters for Vietnamese question phrasing, where pausing mid-question
+is ordinary.
+
+→ **0.8s**, exposed as `--silence`.
+
+The truncation rates above are a cost model, not measurements. They establish the shape of the
+curve, not the exact optimum. A sweep against real recordings on the board is still to be run, and
+it is the measurement that should replace this table.
+
+#### 2.2.3. Guards
+
+The fixed window was the only thing guaranteeing that recording ever ended. Without it, a VAD held
+in speech by sustained noise would listen indefinitely, so these bounds are load-bearing rather
+than defensive:
+
+| Guard | Value | Behaviour |
+|-------|-------|-----------|
+| Hard cap | 12s | Flush the VAD, keep whatever speech it holds, stop |
+| No-speech timeout | 6s | Abort with an error rather than listen forever |
 
 ---
 
@@ -816,9 +890,9 @@ Load-time pinning is not sufficient on its own for onnxruntime, because the *cal
 Three stages were serialized for no reason. All three were overlapped:
 
 **Camera capture during recording.** Capture (gstreamer startup + ~2s exposure settle) ran
-before the microphone opened, though the two are independent. The frame is now grabbed in a
-worker thread while the question is recorded, so the camera costs nothing for any recording
-window longer than ~2.5s.
+before the microphone opened, though the two are independent. The camera now streams for the
+duration of the question and the frame is taken at the end of it, so it costs nothing unless
+the question ends before exposure has settled — see 5.5.
 
 **Synthesis one sentence ahead of playback.** TTS previously rendered the whole answer before
 any sound played. The answer is now split into sentences, sentence N+1 renders while sentence N
@@ -846,8 +920,8 @@ Full pipeline, warm, `pipeline.py` with a WAV question and the demo photo (downs
 | **Time to first sound** | **~20s** |
 | **Total** | **~24-26s** |
 
-With live hardware, the camera is hidden inside the recording window and the question length is
-user-controlled, so the total becomes `record_seconds + ~21s`. Longer answers add time at both
+With live hardware the camera is hidden inside the question and the recording ends when the
+speaker does, so the total becomes `spoken_question + 0.8s + ~21s`. Longer answers add time at both
 VLM decode and TTS. The first run after server startup is slower — STT and the codec sessions
 warm up on first use. Server startup to first servable request is **12.9s** with warm page cache.
 
@@ -874,14 +948,24 @@ arrive sooner and cut deeper; the numbers here should not be assumed to transfer
 
 ### 5.5. Camera Capture
 
-The frame is captured with GStreamer `qtiqmmfsrc` at 1280×720 NV12 (`capture_frame` in
+The frame is captured with GStreamer `qtiqmmfsrc` at 1280×720 NV12 (`RollingCamera` in
 `pipeline.py`), JPEG-encoded and written through `multifilesink`. Two properties of the sensor
 shape how this is done.
 
 **Auto-exposure needs time to settle.** The first frames of any stream are dark — roughly 5 frames
-pass before AE converges. Capture therefore runs `gst-launch-1.0` for a ~2s warmup writing numbered
-frames, then keeps the *newest* one and discards the rest. Taking the first frame instead would
-sample the sensor mid-convergence. This warmup is what 5.2 hides inside the recording window.
+pass before AE converges. The stream therefore stays open for the whole question, writing into a
+5-frame ring buffer, and the *newest* frame is taken once the speaker stops. Taking the first frame
+instead would sample the sensor mid-convergence.
+
+This replaced a one-shot ~2s warmup burst, which was safe only while recording used a fixed 5s
+window. With VAD ending the recording as soon as the speaker stops, a short question would have
+finished before the burst did and put the camera back on the critical path. Streaming for the
+duration removes the coupling entirely: the sensor is converged however long the question runs,
+and the frame is contemporaneous with the question rather than with the start of listening. The
+only remaining wait is when a question ends sooner than AE converges, which is floored at ~2s.
+
+The ring buffer is written to tmpfs where available. At 30fps a long question is several MB of
+JPEG, which does not belong on the board's flash — see 5.6 for why that matters.
 
 **Default exposure is too dark indoors.** `exposure-compensation` accepts −12..12; measured on this
 board against a dim indoor scene:

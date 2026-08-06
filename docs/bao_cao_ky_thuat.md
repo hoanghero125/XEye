@@ -15,6 +15,7 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
   - [1.3. Nguồn Điện](#13-nguồn-điện)
 - [2. Speech-to-Text (STT)](#2-speech-to-text-stt)
   - [2.1. Mô Hình Sử Dụng](#21-mô-hình-sử-dụng)
+  - [2.2. Phát Hiện Giọng Nói (VAD)](#22-phát-hiện-giọng-nói-vad)
 - [3. Text-to-Speech (TTS)](#3-text-to-speech-tts)
   - [3.1. Mô Hình Sử Dụng](#31-mô-hình-sử-dụng)
   - [3.2. Lịch Sử Thử Nghiệm](#32-lịch-sử-thử-nghiệm)
@@ -146,6 +147,78 @@ khác biệt giữa hai con số.
 | Latency decode (warm) | 0.05-0.11s |
 | RTF (warm) | 0.03-0.07x |
 | Latency decode (request đầu sau khi khởi động) | ~0.9s |
+
+---
+
+### 2.2. Phát Hiện Giọng Nói (VAD)
+
+Trước đây việc ghi âm chạy theo một cửa sổ cố định — `arecord -d 5` — luôn chờ đủ năm giây và cắt
+ngang bất kỳ ai còn đang nói ở cuối cửa sổ đó. Người dùng không nhìn thấy thiết bị thì cũng không có
+cách nào biết cửa sổ đó mở ra và đóng lại lúc nào. Silero VAD thay thế cơ chế này: việc ghi âm giờ
+kết thúc ngay khi người nói dừng, và chỉ đoạn tiếng nói đã được cắt gọn mới đi tới model STT.
+
+#### 2.2.1. Cấu Hình
+
+| Thuộc tính | Giá trị |
+|------------|---------|
+| Model | Silero VAD |
+| Kích thước | 629KB, ONNX fp32 |
+| Runtime | sherpa-onnx — vốn đã là runtime của STT, nên không thêm dependency mới |
+| Threads | 1 |
+| Cores | `{0,1,2,3}` — các core hiệu suất A55 |
+| Window size | 512 sample (32ms ở 16kHz) |
+| Threshold | 0.5 |
+| Min speech duration | 0.25s |
+| Min silence duration | 0.8s |
+| Max speech duration | 8s |
+| Sample rate | 16000 Hz |
+
+VAD chạy trong `pipeline.py` chứ không phải trong server. Phần độ trễ tiết kiệm được đến từ việc kết
+thúc ghi âm sớm, mà việc ghi âm lại nằm ở phía client; VAD chạy phía server có thể cắt gọn một file
+WAV đã hoàn tất nhưng không lấy lại được khoảng thời gian đã trôi qua.
+
+Đây cũng là thành phần duy nhất được pin vào các core *hiệu suất*, ngược với 5.1. Với 629KB, một core
+A55 thừa sức chạy realtime, nhờ đó cpu4-7 được để dành cho camera trong lúc người dùng đặt câu hỏi —
+và nếu sau này chuyển sang nghe liên tục thì đây chính là chỗ VAD nên chạy.
+
+#### 2.2.2. Ngưỡng Kết Thúc Câu
+
+`min_silence_duration` là tham số quan trọng nhất. Nó được cộng vào mọi lượt hỏi, vì việc ghi âm luôn
+phải chờ hết khoảng này sau khi người nói dừng. Silero để mặc định 0.5s, vốn được tinh chỉnh cho các
+voice agent hội thoại nơi độ trễ lượt nói chính là sản phẩm. XEye không phải hệ thống đó.
+
+Chi phí hai phía rất lệch nhau. Đặt rộng tay thì chỉ tốn đúng phần dư ra. Đặt quá gắt thì câu hỏi bị
+cắt cụt — STT chỉ nhận được một nửa, VLM trả lời sai một cách đầy tự tin, và người dùng phải chờ hết
+pipeline ~21s mới phát hiện ra là phải hỏi lại, mất khoảng 25s. Với chi phí `d + p(cắt cụt) × 25s`:
+
+| min_silence_duration | Tỉ lệ cắt cụt | Chi phí kỳ vọng |
+|----------------------|---------------|-----------------|
+| 0.4s | 5% | 1.65s |
+| 0.7s | 1% | 0.95s |
+| **0.8s** | **~0.7%** | **0.98s** |
+| 1.0s | 0.3% | 1.08s |
+
+Đường cong dốc ở phía ngắn và gần như phẳng ở phía dài, nên cấu hình nghiêng về phía rộng tay. 0.8s
+cũng vượt qua được khoảng ngắt nghỉ giữa các mệnh đề thông thường (300-600ms) trong khi vẫn thấp hơn
+khoảng ngắt kết thúc lượt nói (700ms+) — điều này quan trọng với cách đặt câu hỏi tiếng Việt, nơi việc
+ngừng giữa câu là bình thường.
+
+→ **0.8s**, mở ra qua tham số `--silence`.
+
+Các tỉ lệ cắt cụt ở trên là một mô hình chi phí, không phải số đo. Chúng xác định hình dạng của đường
+cong chứ không phải điểm tối ưu chính xác. Việc quét tham số trên bản ghi thật ngay trên board vẫn
+chưa chạy, và đó mới là phép đo cần thay thế cho bảng này.
+
+#### 2.2.3. Các Ngưỡng Chặn
+
+Cửa sổ cố định trước đây là thứ duy nhất đảm bảo việc ghi âm sẽ kết thúc. Không có nó, một VAD bị giữ
+ở trạng thái "đang có tiếng nói" bởi tiếng ồn kéo dài sẽ nghe mãi không dừng, nên hai ngưỡng này là
+thiết yếu chứ không phải phòng hờ:
+
+| Ngưỡng chặn | Giá trị | Hành vi |
+|-------------|---------|---------|
+| Giới hạn cứng | 12s | Flush VAD, giữ lại phần tiếng nói đang có, rồi dừng |
+| Timeout không có tiếng nói | 6s | Báo lỗi thay vì nghe vô hạn |
 
 ---
 
@@ -816,9 +889,9 @@ Chỉ pin lúc load model là chưa đủ với onnxruntime, vì thread *gọi* 
 Ba giai đoạn trước đây chạy tuần tự một cách không cần thiết. Cả ba đã được cho chồng lấn:
 
 **Chụp ảnh trong lúc ghi âm.** Việc chụp (khởi động gstreamer + ~2s để exposure ổn định) chạy
-trước khi mở micro, dù hai việc này độc lập nhau. Khung hình giờ được chụp trong một worker
-thread song song với lúc ghi câu hỏi, nên camera không tốn thêm thời gian với mọi cửa sổ ghi âm
-dài hơn ~2.5s.
+trước khi mở micro, dù hai việc này độc lập nhau. Camera giờ chạy stream suốt thời gian người
+dùng đặt câu hỏi và khung hình được lấy ở cuối câu hỏi, nên nó không tốn thêm thời gian trừ khi
+câu hỏi kết thúc trước lúc exposure ổn định — xem 5.5.
 
 **Tổng hợp trước phát một câu.** Trước đây TTS phải tổng hợp toàn bộ câu trả lời rồi mới phát.
 Câu trả lời giờ được tách theo câu, câu N+1 được tổng hợp trong khi câu N đang phát, và tất cả
@@ -846,8 +919,8 @@ Pipeline đầy đủ, trạng thái warm, chạy `pipeline.py` với câu hỏi
 | **Thời gian tới âm thanh đầu tiên** | **~20s** |
 | **Tổng** | **~24-26s** |
 
-Với phần cứng thật, camera được giấu trong cửa sổ ghi âm và độ dài câu hỏi do người dùng quyết
-định, nên tổng thời gian trở thành `record_seconds + ~21s`. Câu trả lời dài hơn tốn thêm thời
+Với phần cứng thật, camera được giấu trong lúc người dùng đang hỏi và việc ghi âm kết thúc ngay
+khi người nói dừng, nên tổng thời gian trở thành `câu_hỏi + 0.8s + ~21s`. Câu trả lời dài hơn tốn thêm thời
 gian ở cả VLM decode lẫn TTS. Lần chạy đầu sau khi khởi động server chậm hơn — STT và các session
 codec cần warm up. Từ lúc khởi động server tới khi phục vụ được request đầu tiên là **12.9s**
 với page cache đang nóng.
@@ -875,15 +948,24 @@ sâu hơn; không nên giả định các con số ở đây vẫn đúng.
 
 ### 5.5. Chụp Ảnh Từ Camera
 
-Khung hình được chụp bằng GStreamer `qtiqmmfsrc` ở 1280×720 NV12 (`capture_frame` trong
+Khung hình được chụp bằng GStreamer `qtiqmmfsrc` ở 1280×720 NV12 (`RollingCamera` trong
 `pipeline.py`), encode JPEG rồi ghi qua `multifilesink`. Hai đặc tính của cảm biến quyết định cách
 làm này.
 
 **Auto-exposure cần thời gian để ổn định.** Những khung hình đầu của mọi luồng đều tối — cần khoảng
-5 frame thì AE mới hội tụ. Vì vậy quá trình chụp chạy `gst-launch-1.0` khoảng 2s warmup, ghi ra các
-frame được đánh số, rồi giữ lại frame *mới nhất* và bỏ phần còn lại. Lấy frame đầu tiên đồng nghĩa
-với việc lấy mẫu giữa lúc cảm biến còn đang hội tụ. Chính khoảng warmup này được 5.2 giấu vào trong
-cửa sổ ghi âm.
+5 frame thì AE mới hội tụ. Vì vậy stream được giữ mở suốt câu hỏi, ghi vào một ring buffer 5 frame,
+và frame *mới nhất* được lấy ngay khi người nói dừng. Lấy frame đầu tiên đồng nghĩa với việc lấy mẫu
+giữa lúc cảm biến còn đang hội tụ.
+
+Cách này thay cho kiểu chụp một lần với ~2s warmup trước đây, vốn chỉ an toàn khi việc ghi âm dùng
+cửa sổ cố định 5s. Khi VAD kết thúc ghi âm ngay lúc người nói dừng, một câu hỏi ngắn sẽ kết thúc
+trước cả đợt warmup và đẩy camera trở lại đường găng. Chạy stream suốt câu hỏi loại bỏ hoàn toàn
+ràng buộc đó: cảm biến đã hội tụ bất kể câu hỏi dài bao lâu, và khung hình cùng thời điểm với câu
+hỏi chứ không phải với lúc bắt đầu nghe. Chỉ còn phải chờ khi câu hỏi kết thúc sớm hơn lúc AE hội
+tụ, và mức chờ này được chặn sàn ở ~2s.
+
+Ring buffer được ghi vào tmpfs nếu có. Ở 30fps, một câu hỏi dài là vài MB JPEG, và chỗ đó không nên
+là flash của board — xem 5.6 để biết vì sao điều này quan trọng.
 
 **Exposure mặc định quá tối khi ở trong nhà.** `exposure-compensation` nhận giá trị −12..12; đo trên
 board này với một cảnh trong nhà thiếu sáng:

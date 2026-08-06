@@ -38,6 +38,7 @@ Camera ────→ Image input ────→ Vision Language Model
 
 | Module | Model | Runtime | Quantization | Performance |
 |--------|-------|---------|--------------|-------------|
+| VAD | [Silero VAD](https://github.com/snakers4/silero-vad) | sherpa-onnx | fp32 | 629KB, ends the question 0.8s after you stop |
 | STT | [ZipFormer-30M RNNT](https://huggingface.co/hynt/Zipformer-30M-RNNT-6000h) | sherpa-onnx | int8 | RTF 0.03-0.07x |
 | VLM | [Vintern-1B-v3_5](https://huggingface.co/dekthedev/Vintern-1B-v3_5-GGUF) | llama-cpp-python | Q4_K_M | ~17-21s per image |
 | TTS | [VieNeu-TTS-v3-Turbo](https://huggingface.co/pnnbao-ump/VieNeu-TTS-v3-Turbo) | onnxruntime | int8 | RTF 0.80-0.97x |
@@ -187,17 +188,19 @@ v3 can also clone a voice from a 3–5s reference clip; XEye does not expose tha
 # Full hardware loop: camera + ReSpeaker mic in, ReSpeaker speaker out
 python pipeline.py
 
-# Longer question window, or keep the answer silent
-python pipeline.py --record 8
+# Wait longer before deciding the question ended, or keep the answer silent
+python pipeline.py --silence 1.0
 python pipeline.py --no-play
 
 # Replay from files instead of live hardware
 python pipeline.py demo/audio/question.wav --image demo/images/IMG_6817.jpg
 ```
 
-With no arguments the pipeline captures a frame from the camera, records `--record` seconds (default 5) from the ReSpeaker mic array at 16kHz, and plays the spoken answer back through the ReSpeaker's speaker. The ALSA device is located by card name, so it survives card-order changes. Either input can be overridden by passing a WAV path or `--image`.
+With no arguments the pipeline records from the ReSpeaker mic array at 16kHz until you stop speaking, captures a frame from the camera, and plays the spoken answer back through the ReSpeaker's speaker. The ALSA device is located by card name, so it survives card-order changes. Either input can be overridden by passing a WAV path or `--image`.
 
-The frame is captured *while* the question is being recorded, and the answer is synthesized one sentence ahead of playback, so speech starts after the first sentence rather than the whole reply.
+There is no fixed recording window — Silero VAD ends the question `--silence` seconds (default 0.8) after you stop talking, and only the trimmed speech is sent to `/stt`. Two guards bound it: `--max-record` (default 12s) caps a single question, and the pipeline gives up if nobody speaks within 6s. Raise `--silence` if it cuts you off mid-question; lower it if the wait after speaking feels long.
+
+The camera streams *while* the question is being asked and the frame is taken at the moment you stop speaking — so it is both correctly exposed and contemporaneous with the question, however short. The answer is synthesized one sentence ahead of playback, so speech starts after the first sentence rather than the whole reply.
 
 ### dev vs prod mode
 
@@ -286,7 +289,8 @@ xeye
 │  └─ technical_report.md       # Technical report (English)
 ├─ models                       # (not tracked — created by download_models.py)
 │  ├─ vintern/                  # Vintern-1B-v3_5 GGUF + mmproj F16
-│  └─ stt/                      # ZipFormer RNNT int8 ONNX
+│  ├─ stt/                      # ZipFormer RNNT int8 ONNX
+│  └─ vad/                      # Silero VAD ONNX
 │                               # TTS weights live in ~/.cache/huggingface/hub
 ├─ scripts
 │  ├─ stt_infer.py              # STT test script

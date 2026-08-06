@@ -22,6 +22,7 @@ $PIP install --no-deps vieneu==3.2.3
 echo "==> [3/3] Creating directories"
 mkdir -p "$ROOT/models/vintern"
 mkdir -p "$ROOT/models/stt"
+mkdir -p "$ROOT/models/vad"
 mkdir -p "$ROOT/data/audio"
 mkdir -p "$ROOT/data/images"
 
