@@ -1,6 +1,6 @@
 # Technical Report: XEye
 
-**Last updated:** 24/07/2026 
+**Last updated:** 07/08/2026 
 **Author:** Do Pham Bao Hoang
 
 All performance figures in this report were measured on the running server on 23-24/07/2026 (RUBIK Pi 3, warm — the first request after startup is slower).
@@ -12,6 +12,7 @@ All performance figures in this report were measured on the running server on 23
 - [1. System Information](#1-system-information)
   - [1.1. Hardware](#11-hardware)
   - [1.2. Software](#12-software)
+  - [1.3. Power](#13-power)
 - [2. Speech-to-Text (STT)](#2-speech-to-text-stt)
   - [2.1. Model Used](#21-model-used)
 - [3. Text-to-Speech (TTS)](#3-text-to-speech-tts)
@@ -40,6 +41,8 @@ All performance figures in this report were measured on the running server on 23
   - [5.2. Pipeline Concurrency](#52-pipeline-concurrency)
   - [5.3. End-to-End Latency](#53-end-to-end-latency)
   - [5.4. Thermal Behaviour](#54-thermal-behaviour)
+  - [5.5. Camera Capture](#55-camera-capture)
+  - [5.6. Runtime Modes](#56-runtime-modes)
 - [6. Summary](#6-summary)
   - [6.1. Selected Models](#61-selected-models)
   - [6.2. Current Limitations](#62-current-limitations)
@@ -60,6 +63,7 @@ All performance figures in this report were measured on the running server on 23
 | NPU | Hexagon 780 (V73), 12 TOPS |
 | Camera | Raspberry Pi Camera Module 2 (IMX219) on CSI connector 1, captured via GStreamer `qtiqmmfsrc` at 1280×720 NV12. Board requires a 22-pin 0.5mm FPC; standard variant only (no NoIR/wide-angle) |
 | Audio | Seeed Studio ReSpeaker Lite (USB) — mic array in, speaker out |
+| Power | 3S2P Li-ion pack, ~55.5 Wh, through a DC-DC module with USB-C PD output — see 1.3 |
 | OS | Ubuntu (Linux 6.8.0-1071-qcom) |
 
 ### 1.2. Software
@@ -75,6 +79,44 @@ Versions the measurements in this report were taken with. The three inference ru
 | onnxruntime | 1.24.4 |
 | sea-g2p / perth | 0.7.20 / 1.0.0 |
 | FastAPI / uvicorn | 0.136.1 / 0.47.0 |
+
+### 1.3. Power
+
+XEye runs on battery, not a bench supply — every figure in this report was measured that way.
+
+| Attribute | Value |
+|-----------|-------|
+| Pack | 3S2P Li-ion — 6× 18650, 3 in series × 2 in parallel |
+| Nominal voltage | 11.1V (3 × 3.7V) |
+| Voltage range | 12.6V charged → ~9.0V at BMS cutoff |
+| Capacity | 5Ah (2 × 2.5Ah cells in parallel) |
+| Energy | ~55.5 Wh |
+| Delivery | Pack → power connector → DC-DC module with USB-C PD output → board |
+
+**The conversion stage is not optional.** The RUBIK Pi 3 takes power over USB-C and requires a
+PD 3.0 negotiation at 12V/3A; without one the power LED stays off and the board does not boot. A
+battery pack presents a passive rail with no PD controller, so it cannot drive the board directly
+no matter how close its voltage sits to 12V. The module in between is what negotiates, and the
+board booting from the pack is the evidence that it does.
+
+That module has to boost, not merely regulate. A 3S pack sits above 12V only briefly after a full
+charge and spends most of its discharge curve between ~11.5V and ~9V — below the voltage it has to
+supply — so conversion loss applies to the majority of the stored energy rather than a corner of
+it. The pack's BMS continuous-current rating must also clear the module's *input* draw, which
+rises as the pack drains and the boost ratio grows.
+
+At ~55.5 Wh the pack is under the 100 Wh threshold airlines apply to spare lithium batteries in
+carry-on baggage.
+
+Measured runtime on this pack:
+
+| Condition | Runtime |
+|-----------|---------|
+| Continuous querying (full load) | 1-2h |
+| Idle | 4-5h |
+
+Under continuous querying the four performance cores hold the throttled operating point described
+in 5.4, which is what separates the two figures.
 
 ---
 
@@ -297,7 +339,7 @@ Migrated. 48 kHz output, 14 voices, less than half the peak memory of v2.
 | Threads | 4 |
 | Context | 2048 |
 | Max new tokens | 128 |
-| Repeat penalty | 1.1 |
+| Repeat penalty | 1.1 (override: `XEYE_VLM_REPEAT_PENALTY`) |
 
 `llama-cpp-python` defaults `repeat_penalty` to 1.0 — disabled — where llama.cpp's own default
 is 1.1. Left at 1.0, the model occasionally falls into a repetition loop that runs to the token
@@ -658,7 +700,20 @@ version's `Llava15ChatHandler` encodes a single tile. Bumping it quadruples VLM 
 The corollary is that XEye runs the model at lower effective resolution than upstream intends —
 a deliberate quality-for-speed trade.
 
-##### 4.2.10.4. Results
+##### 4.2.10.4. Native Recompilation
+
+The prebuilt `llama-cpp-python` wheel targets a generic aarch64 baseline, so rebuilding from
+source with `-march=native` looked like free throughput on a CPU whose features are known.
+
+It is not, because the kernels that dominate matmul are not selected at compile time. llama.cpp
+builds with `LLAMAFILE=1`, whose sgemm path dispatches on CPU features detected at *runtime* —
+the same kernel executes whether or not the build was told about the target. Nor is there a wider
+path waiting to be unlocked: 4.2.10.2 established that this CPU exposes `asimdhp` but neither
+`i8mm` nor SVE, so the widest matmul kernel available is already the one being chosen.
+
+→ **Ineffective.** A native rebuild runs the same kernels as the stock wheel.
+
+##### 4.2.10.5. Results
 
 No lever improved on the current configuration. 17-21s per image is the floor for this model
 on this hardware.
@@ -814,6 +869,56 @@ to 2208, 2515 and twice to **2035MHz** — a 25% clock reduction as throttling e
 
 This was measured on an open desk. Inside an enclosure worn against the body, throttling will
 arrive sooner and cut deeper; the numbers here should not be assumed to transfer.
+
+---
+
+### 5.5. Camera Capture
+
+The frame is captured with GStreamer `qtiqmmfsrc` at 1280×720 NV12 (`capture_frame` in
+`pipeline.py`), JPEG-encoded and written through `multifilesink`. Two properties of the sensor
+shape how this is done.
+
+**Auto-exposure needs time to settle.** The first frames of any stream are dark — roughly 5 frames
+pass before AE converges. Capture therefore runs `gst-launch-1.0` for a ~2s warmup writing numbered
+frames, then keeps the *newest* one and discards the rest. Taking the first frame instead would
+sample the sensor mid-convergence. This warmup is what 5.2 hides inside the recording window.
+
+**Default exposure is too dark indoors.** `exposure-compensation` accepts −12..12; measured on this
+board against a dim indoor scene:
+
+| exposure-compensation | Result |
+|-----------------------|--------|
+| 0 | mean brightness 122 |
+| **+2** | **mean brightness 138 — no clipping** |
+| +4 | 22% of pixels blown out |
+| +6 | 29% of pixels blown out |
+
+→ **`EXPOSURE = 2`.** It recovers shadow detail without clipping highlights; +4 and above only
+trade one failure for the other.
+
+**One consumer only.** The camera admits a single reader, so a capture and
+`scripts/camera_preview.py` cannot run at the same time. The preview server tracks the live
+`gst-launch-1.0` process and terminates it when a new viewer connects, so a stale stream cannot
+lock the camera out.
+
+### 5.6. Runtime Modes
+
+`pipeline.py` runs in one of two modes, selected by `--mode`, the `XEYE_MODE` environment variable,
+or the `MODE` constant:
+
+| Mode | Behaviour |
+|------|-----------|
+| `dev` *(default)* | Writes the synthesized answer to `data/audio/output.wav` |
+| `prod` | Writes nothing to disk — audio goes only to the speaker |
+
+In `prod` the PCM chunks are streamed straight into `aplay` and never accumulated, so the answer
+exists only in memory. This matters twice over. Answer audio at 48kHz 16-bit mono costs 96 KB/s,
+and 3.1.3 measures a typical answer at 3.9-4.6s of audio, so `dev` writes roughly 0.4MB per query
+and up to ~1MB on a long one — continuous flash wear on a device expected to answer questions all
+day. It is also a privacy property: a wearable that records what its user asked and what was in
+front of them leaves that history on disk, and `prod` leaves none.
+
+`--output PATH` overrides both and always saves, for one-off debugging.
 
 ---
 

@@ -1,6 +1,6 @@
 # Báo Cáo Kỹ Thuật: XEye
 
-**Cập nhật lần cuối:** 24/07/2026  
+**Cập nhật lần cuối:** 07/08/2026  
 **Tác giả:** Đỗ Phạm Bảo Hoàng
 
 Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên server đang chạy ngày 23-24/07/2026 (RUBIK Pi 3, trạng thái warm — request đầu tiên sau khi khởi động server luôn chậm hơn).
@@ -12,6 +12,7 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
 - [1. Thông Tin Hệ Thống](#1-thông-tin-hệ-thống)
   - [1.1. Phần Cứng](#11-phần-cứng)
   - [1.2. Phần Mềm](#12-phần-mềm)
+  - [1.3. Nguồn Điện](#13-nguồn-điện)
 - [2. Speech-to-Text (STT)](#2-speech-to-text-stt)
   - [2.1. Mô Hình Sử Dụng](#21-mô-hình-sử-dụng)
 - [3. Text-to-Speech (TTS)](#3-text-to-speech-tts)
@@ -40,6 +41,8 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
   - [5.2. Chạy Song Song Trong Pipeline](#52-chạy-song-song-trong-pipeline)
   - [5.3. Độ Trễ End-to-End](#53-độ-trễ-end-to-end)
   - [5.4. Hành Vi Nhiệt](#54-hành-vi-nhiệt)
+  - [5.5. Chụp Ảnh Từ Camera](#55-chụp-ảnh-từ-camera)
+  - [5.6. Chế Độ Chạy](#56-chế-độ-chạy)
 - [6. Tổng kết](#6-tổng-kết)
   - [6.1. Mô Hình Được Chọn](#61-mô-hình-được-chọn)
   - [6.2. Giới Hạn Hiện Tại](#62-giới-hạn-hiện-tại)
@@ -60,6 +63,7 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
 | NPU | Hexagon 780 (V73), 12 TOPS |
 | Camera | Raspberry Pi Camera Module 2 (IMX219) trên CSI connector 1, chụp qua GStreamer `qtiqmmfsrc` ở 1280×720 NV12. Board yêu cầu FPC 22-pin 0.5mm; chỉ hỗ trợ bản standard (không hỗ trợ NoIR/wide-angle) |
 | Audio | Seeed Studio ReSpeaker Lite (USB) — mic array vào, speaker ra |
+| Nguồn | Pack Li-ion 3S2P, ~55.5 Wh, qua module DC-DC có ngõ ra USB-C PD — xem 1.3 |
 | OS | Ubuntu (Linux 6.8.0-1071-qcom) |
 
 ### 1.2. Phần Mềm
@@ -75,6 +79,45 @@ Các phiên bản đã dùng khi đo số liệu trong báo cáo này. Ba runtim
 | onnxruntime | 1.24.4 |
 | sea-g2p / perth | 0.7.20 / 1.0.0 |
 | FastAPI / uvicorn | 0.136.1 / 0.47.0 |
+
+### 1.3. Nguồn Điện
+
+XEye chạy bằng pin chứ không phải nguồn bàn — toàn bộ số liệu trong báo cáo này đều được đo ở
+trạng thái đó.
+
+| Thuộc tính | Giá trị |
+|------------|---------|
+| Pack | Li-ion 3S2P — 6× 18650, 3 nối tiếp × 2 song song |
+| Điện áp danh định | 11.1V (3 × 3.7V) |
+| Dải điện áp | 12.6V khi đầy → ~9.0V tại ngưỡng cắt của BMS |
+| Dung lượng | 5Ah (2 × cell 2.5Ah mắc song song) |
+| Năng lượng | ~55.5 Wh |
+| Đường cấp nguồn | Pack → jack nguồn → module DC-DC có ngõ ra USB-C PD → board |
+
+**Tầng chuyển đổi này là bắt buộc.** RUBIK Pi 3 nhận nguồn qua USB-C và yêu cầu thương lượng PD 3.0
+ở mức 12V/3A; không có nó thì đèn báo nguồn không sáng và board không khởi động. Pack pin chỉ đưa ra
+một đường điện thụ động, không có PD controller, nên không thể cấp nguồn trực tiếp cho board dù điện
+áp có gần 12V đến đâu. Module ở giữa mới là thứ thực hiện thương lượng, và việc board khởi động được
+từ pin chính là bằng chứng nó làm được điều đó.
+
+Module đó phải boost chứ không chỉ ổn áp. Pack 3S chỉ ở trên 12V trong thời gian ngắn sau khi sạc
+đầy, còn phần lớn đường xả nằm trong khoảng ~11.5V đến ~9V — thấp hơn mức điện áp phải cấp ra — nên
+tổn hao chuyển đổi áp lên phần lớn năng lượng tích trữ chứ không phải một phần nhỏ. Dòng xả liên tục
+cho phép của BMS cũng phải lớn hơn dòng *đầu vào* của module, vốn tăng dần khi pin cạn và tỉ số boost
+lớn lên.
+
+Ở mức ~55.5 Wh, pack nằm dưới ngưỡng 100 Wh mà các hãng hàng không áp dụng cho pin lithium dự phòng
+trong hành lý xách tay.
+
+Thời lượng pin đo được trên pack này:
+
+| Điều kiện | Thời lượng |
+|-----------|------------|
+| Hỏi liên tục (full load) | 1-2h |
+| Nhàn rỗi | 4-5h |
+
+Khi hỏi liên tục, bốn core hiệu năng giữ ở điểm vận hành đã bị throttle mô tả trong 5.4, và đó là
+khác biệt giữa hai con số.
 
 ---
 
@@ -297,7 +340,7 @@ trong suốt `infer()`, rồi khôi phục mask cũ sau đó.
 | Threads | 4 |
 | Context | 2048 |
 | Max new tokens | 128 |
-| Repeat penalty | 1.1 |
+| Repeat penalty | 1.1 (override: `XEYE_VLM_REPEAT_PENALTY`) |
 
 `llama-cpp-python` để mặc định `repeat_penalty` là 1.0 — tức tắt — trong khi mặc định của chính
 llama.cpp là 1.1. Khi để 1.0, model thỉnh thoảng rơi vào vòng lặp lặp từ chạy đến hết token cap:
@@ -658,7 +701,20 @@ Build `llama-mtmd-cli` từ master và chạy đúng tấm ảnh đó: master á
 VLM tăng gấp 4 lần. Hệ quả kèm theo là XEye đang chạy model ở độ phân giải hiệu dụng thấp hơn
 thiết kế gốc — một đánh đổi chất lượng lấy tốc độ có chủ đích.
 
-##### 4.2.10.4. Kết Quả
+##### 4.2.10.4. Build Lại Native
+
+Wheel dựng sẵn của `llama-cpp-python` nhắm vào baseline aarch64 chung, nên build lại từ source với
+`-march=native` trông như một khoản throughput miễn phí trên một CPU đã biết rõ đặc tính.
+
+Thực tế thì không, vì các kernel chiếm phần lớn matmul không được chọn ở thời điểm compile.
+llama.cpp build với `LLAMAFILE=1`, và đường sgemm của nó dispatch dựa trên đặc trưng CPU phát hiện
+được lúc *chạy* — cùng một kernel sẽ thực thi bất kể build có được báo về target hay không. Cũng
+không có đường nào rộng hơn đang chờ được mở: 4.2.10.2 đã xác định CPU này có `asimdhp` nhưng
+không có `i8mm` lẫn SVE, nên kernel matmul rộng nhất khả dụng vốn đã là kernel đang được chọn.
+
+→ **Không hiệu quả.** Build native chạy đúng những kernel mà wheel gốc đang chạy.
+
+##### 4.2.10.5. Kết Quả
 
 Không hướng nào cải thiện được cấu hình hiện tại. 17-21s mỗi ảnh là ngưỡng sàn cho model này
 trên phần cứng này.
@@ -814,6 +870,57 @@ Tần số CPU xác nhận cơ chế: cpu7 giữ 2707MHz trong khoảng chục r
 
 Số liệu này đo trên bàn thoáng. Khi đặt trong vỏ máy đeo sát người, throttling sẽ đến sớm hơn và
 sâu hơn; không nên giả định các con số ở đây vẫn đúng.
+
+---
+
+### 5.5. Chụp Ảnh Từ Camera
+
+Khung hình được chụp bằng GStreamer `qtiqmmfsrc` ở 1280×720 NV12 (`capture_frame` trong
+`pipeline.py`), encode JPEG rồi ghi qua `multifilesink`. Hai đặc tính của cảm biến quyết định cách
+làm này.
+
+**Auto-exposure cần thời gian để ổn định.** Những khung hình đầu của mọi luồng đều tối — cần khoảng
+5 frame thì AE mới hội tụ. Vì vậy quá trình chụp chạy `gst-launch-1.0` khoảng 2s warmup, ghi ra các
+frame được đánh số, rồi giữ lại frame *mới nhất* và bỏ phần còn lại. Lấy frame đầu tiên đồng nghĩa
+với việc lấy mẫu giữa lúc cảm biến còn đang hội tụ. Chính khoảng warmup này được 5.2 giấu vào trong
+cửa sổ ghi âm.
+
+**Exposure mặc định quá tối khi ở trong nhà.** `exposure-compensation` nhận giá trị −12..12; đo trên
+board này với một cảnh trong nhà thiếu sáng:
+
+| exposure-compensation | Kết quả |
+|-----------------------|---------|
+| 0 | độ sáng trung bình 122 |
+| **+2** | **độ sáng trung bình 138 — không cháy sáng** |
+| +4 | 22% pixel bị cháy sáng |
+| +6 | 29% pixel bị cháy sáng |
+
+→ **`EXPOSURE = 2`.** Mức này lấy lại được chi tiết vùng tối mà không làm cháy vùng sáng; từ +4 trở
+lên chỉ là đổi lỗi này lấy lỗi kia.
+
+**Chỉ một consumer.** Camera chỉ cho phép một tiến trình đọc, nên việc chụp ảnh và
+`scripts/camera_preview.py` không thể chạy đồng thời. Server preview theo dõi tiến trình
+`gst-launch-1.0` đang sống và kill nó khi có viewer mới kết nối, để một luồng cũ không khóa mất
+camera.
+
+### 5.6. Chế Độ Chạy
+
+`pipeline.py` chạy ở một trong hai chế độ, chọn bằng `--mode`, biến môi trường `XEYE_MODE`, hoặc
+hằng `MODE`:
+
+| Chế độ | Hành vi |
+|--------|---------|
+| `dev` *(mặc định)* | Ghi câu trả lời đã tổng hợp ra `data/audio/output.wav` |
+| `prod` | Không ghi gì xuống đĩa — âm thanh chỉ đi ra loa |
+
+Ở `prod`, các chunk PCM được đẩy thẳng vào `aplay` và không bao giờ được gom lại, nên câu trả lời
+chỉ tồn tại trong bộ nhớ. Điều này có ý nghĩa ở hai mặt. Âm thanh đầu ra 48kHz 16-bit mono tốn
+96 KB/s, và 3.1.3 đo được một câu trả lời điển hình dài 3.9-4.6s, nên `dev` ghi khoảng 0.4MB mỗi
+lượt hỏi và tới ~1MB với câu dài — hao mòn flash liên tục trên một thiết bị được kỳ vọng trả lời
+suốt cả ngày. Đây đồng thời là một tính chất về quyền riêng tư: một thiết bị đeo ghi lại người dùng
+đã hỏi gì và trước mặt họ có gì sẽ để lại toàn bộ lịch sử đó trên đĩa, còn `prod` không để lại gì.
+
+`--output PATH` ghi đè cả hai và luôn lưu, dùng cho việc debug từng lần.
 
 ---
 

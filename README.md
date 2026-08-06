@@ -5,7 +5,7 @@
 
 XEye is a wearable, on-device AI assistant for the visually impaired, built on [Qualcomm Dragonwing™ QCS6490](https://www.qualcomm.com/internet-of-things/products/q6-series/qcs6490) Platform - [Thundercomm RUBIK Pi 3](https://rubikpi.ai/).
 
-**Technical Notes:** [English](docs/technical_report.md) · [Tiếng Việt](docs/bao_cao_ky_thuat.md) *(Last updated: 24/07/2026)*
+**Technical Notes:** [English](docs/technical_report.md) · [Tiếng Việt](docs/bao_cao_ky_thuat.md) *(Last updated: 07/08/2026)*
 
 ## Pipeline
 
@@ -31,6 +31,7 @@ Camera ────→ Image input ────→ Vision Language Model
 | **GPU** | Adreno 643 |
 | **Camera** | Raspberry Pi Camera Module 2 (IMX219), CSI connector 1 — captured via GStreamer `qtiqmmfsrc` |
 | **Audio** | Seeed Studio ReSpeaker Lite (USB) — mic array + speaker out |
+| **Power** | 3S2P Li-ion pack (6× 18650), 11.1V nominal, ~55.5 Wh — 1-2h under full load, 4-5h idle. Fed through a DC-DC module with USB-C PD output, since the board requires PD 3.0 at 12V/3A and will not boot without it |
 | **OS** | Ubuntu (Linux 6.8.0-1071-qcom) |
 
 ## Models
