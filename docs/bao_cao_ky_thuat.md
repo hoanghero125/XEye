@@ -13,9 +13,11 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
   - [1.1. Phần Cứng](#11-phần-cứng)
   - [1.2. Phần Mềm](#12-phần-mềm)
   - [1.3. Nguồn Điện](#13-nguồn-điện)
+  - [1.4. Nút Nhấn](#14-nút-nhấn)
 - [2. Speech-to-Text (STT)](#2-speech-to-text-stt)
   - [2.1. Mô Hình Sử Dụng](#21-mô-hình-sử-dụng)
   - [2.2. Phát Hiện Giọng Nói (VAD)](#22-phát-hiện-giọng-nói-vad)
+  - [2.3. Môi Trường Ồn](#23-môi-trường-ồn)
 - [3. Text-to-Speech (TTS)](#3-text-to-speech-tts)
   - [3.1. Mô Hình Sử Dụng](#31-mô-hình-sử-dụng)
   - [3.2. Lịch Sử Thử Nghiệm](#32-lịch-sử-thử-nghiệm)
@@ -23,6 +25,8 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
     - [3.2.2. Thử Nghiệm 2: Tìm model phù hợp hơn](#322-thử-nghiệm-2-tìm-model-phù-hợp-hơn)
     - [3.2.3. Thử Nghiệm 3: Tối ưu](#323-thử-nghiệm-3-tối-ưu)
     - [3.2.4. Thử Nghiệm 4: Migrate sang v3 Turbo](#324-thử-nghiệm-4-migrate-sang-v3-turbo)
+  - [3.3. Mức Âm Lượng Phát](#33-mức-âm-lượng-phát)
+  - [3.4. Âm Báo Tương Tác](#34-âm-báo-tương-tác)
 - [4. Vision-Language Model (VLM)](#4-vision-language-model-vlm)
   - [4.1. Mô Hình Sử Dụng](#41-mô-hình-sử-dụng)
   - [4.2. Lịch Sử Thử Nghiệm](#42-lịch-sử-thử-nghiệm)
@@ -64,6 +68,7 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
 | NPU | Hexagon 780 (V73), 12 TOPS |
 | Camera | Raspberry Pi Camera Module 2 (IMX219) trên CSI connector 1, chụp qua GStreamer `qtiqmmfsrc` ở 1280×720 NV12. Board yêu cầu FPC 22-pin 0.5mm; chỉ hỗ trợ bản standard (không hỗ trợ NoIR/wide-angle) |
 | Audio | Seeed Studio ReSpeaker Lite (USB) — mic array vào, speaker ra |
+| Nút nhấn | PBS-33B 12mm loại nhấn nhả, 2P, không đèn, chống nước — chân 13/14 của header 40 pin, xem 1.4 |
 | Nguồn | Pack Li-ion 3S2P, ~55.5 Wh, qua module DC-DC có ngõ ra USB-C PD — xem 1.3 |
 | OS | Ubuntu (Linux 6.8.0-1071-qcom) |
 
@@ -120,6 +125,54 @@ Thời lượng pin đo được trên pack này:
 Khi hỏi liên tục, bốn core hiệu năng giữ ở điểm vận hành đã bị throttle mô tả trong 5.4, và đó là
 khác biệt giữa hai con số.
 
+### 1.4. Nút Nhấn
+
+Một cú nhấn bắt đầu một lượt hỏi. Trước đó, cách kích hoạt duy nhất là chạy `pipeline.py` từ shell
+— việc mà chính người dùng của thiết bị không thể làm được.
+
+| Thuộc tính | Giá trị |
+|------------|---------|
+| Loại công tắc | PBS-33B, gắn panel 12mm, nhấn nhả, 2P, không đèn, chống nước |
+| Thông số | 1A/250V (dành cho điện lưới; tải thực tế chỉ vài microampe ở 3.3V) |
+| Kết nối | Chân vật lý 13 (GPIO_24, sysfs 559) và chân 14 (GND), header LS 40 pin |
+| Mức logic | Active-low, dùng pull-up nội, không cần điện trở ngoài |
+| Debounce | 50ms, thực hiện trong kernel qua libgpiod nếu có |
+| Lọc nhiễu | Tụ 100nF mắc song song hai chân công tắc |
+
+**Chọn loại nhấn nhả chứ không phải loại giữ trạng thái, vì VAD đã lo đầu còn lại.** Cú nhấn chỉ có
+nghĩa "bắt đầu nghe"; phần 2.2 quyết định khi nào câu hỏi kết thúc. Không bao giờ phải giữ nút, điều
+này cũng phù hợp với người dùng không nhìn thấy để biết cần giữ bao lâu.
+
+**Không dùng pull-up ngoài.** Header chạy ở mức 3.3V — mức 1.8V thường gặp trên các chip Qualcomm
+không áp dụng ở đây — nhưng datasheet giới hạn điện trở pull-up và pull-down ngoài **không được nhỏ
+hơn 50 kΩ**, do hạn chế của IC level shifter trên board. Mức 10 kΩ mà mọi hướng dẫn Raspberry Pi đưa
+ra vi phạm giới hạn này gấp 5 lần. Dùng pull-up nội của SoC thì không phải bận tâm tới chuyện đó nữa.
+
+**Chọn chân.** 28 trong 40 chân có thể làm GPIO nhưng phần lớn đã mang một chức năng mặc định — 2×
+I2C (gồm chân 3 và 5), 1× UART (chân 8 và 10, `/dev/ttyHS3`), 1× SPI (chân 19, 21, 23, 24), 1× I2S
+và 1× PWM — chỉ còn lại 9 chân trống. Chân 13 là một trong số đó, và chân 14 là ground (đã kiểm chứng
+trực tiếp trên board chứ không suy ra từ sơ đồ Raspberry Pi), nên hai chân tạo thành một cặp
+GPIO/ground nằm sát cạnh nhau và đầu nối 2 chân cắm thẳng vào được mà không phải bắt chéo dây.
+
+**Có ba hệ đánh số cùng mô tả một chân, và chúng không thay thế cho nhau được.** 13 là vị trí vật lý,
+`GPIO_24` là tên tín hiệu của board, còn `559` là số toàn cục mà tài liệu nhà sản xuất dùng cho giao
+diện `/sys/class/gpio` đã lỗi thời. libgpiod không dùng số nào trong đó — nó định danh một line bằng
+chip cộng offset, do kernel gán lúc khởi động. Offset đó được tra trên board bằng `gpiofind GPIO_24`,
+hoặc từ `gpioinfo` nếu device tree không đặt tên cho các line, rồi truyền vào qua `XEYE_BUTTON_LINE`.
+`pipeline.py` từ chối khởi động ở chế độ nút nhấn cho tới khi biến này được đặt, thay vì lấy một giá
+trị đoán mò rồi ngồi chờ im lặng trên sai line.
+
+**Tụ 100nF có ích ở hai mặt.** Kết hợp với pull-up ~50 kΩ, nó tạo thành mạch RC ~5ms, vừa debounce
+bằng phần cứng vừa ngăn một sợi dây dài chạy tới nút gắn trên quai đeo gây kích hoạt nhầm ở một ngõ
+vào trở kháng cao. Nó cũng tạo ra một xung phóng điện nhỏ qua tiếp điểm mỗi lần nhấn, điều này quan
+trọng vì tiếp điểm loại dùng cho điện lưới không mạ vàng, và đóng cắt ở mức microampe là điều kiện
+dry-circuit nơi màng oxit sẽ tích tụ dần.
+
+**Nó cũng biến `pipeline.py` thành một vòng lặp.** `--button` chờ một cú nhấn, trả lời, rồi quay lại
+chờ, nên thiết bị không cần terminal nào sau khi khởi động. Một lượt hỏi thất bại sẽ được báo lỗi và
+vòng lặp vẫn tiếp tục — trên một thiết bị đeo, một trục trặc camera hay một lần server khởi động lại
+không được phép kết thúc phiên làm việc.
+
 ---
 
 ## 2. Speech-to-Text (STT)
@@ -167,7 +220,7 @@ kết thúc ngay khi người nói dừng, và chỉ đoạn tiếng nói đã �
 | Threads | 1 |
 | Cores | `{0,1,2,3}` — các core hiệu suất A55 |
 | Window size | 512 sample (32ms ở 16kHz) |
-| Threshold | 0.5 |
+| Threshold | 0.6 (mặc định của Silero là 0.5 — xem 2.3) |
 | Min speech duration | 0.25s |
 | Min silence duration | 0.8s |
 | Max speech duration | 8s |
@@ -219,6 +272,69 @@ thiết yếu chứ không phải phòng hờ:
 |-------------|---------|---------|
 | Giới hạn cứng | 12s | Flush VAD, giữ lại phần tiếng nói đang có, rồi dừng |
 | Timeout không có tiếng nói | 6s | Báo lỗi thay vì nghe vô hạn |
+
+---
+
+### 2.3. Môi Trường Ồn
+
+**Đường tín hiệu âm thanh đầu vào chưa được đo trong điều kiện ồn.** Mọi số liệu ở 2.1 và 2.2 đều
+lấy từ bản ghi sạch — một câu nói 1.8s trong phòng yên tĩnh. Một thiết bị đeo dùng ngoài đường sẽ
+không gặp điều kiện đó. Phần này ghi lại những gì đường tín hiệu đang dựa vào và những gì dự kiến sẽ
+hỏng, để khoảng trống này là rõ ràng chứ không phải ngầm hiểu.
+
+#### 2.3.1. Phần Cứng Cung Cấp Những Gì
+
+Chip XMOS XU316 trên ReSpeaker Lite chạy khử vọng âm (AEC), khử nhiễu (NS), tự động điều chỉnh độ
+lợi (AGC), khử nhiễu can thiệp (IC) và ước lượng tỉ số tiếng nói trên nhiễu (VNR), với tầm thu xa
+tới 3m. XEye chưa hề cấu hình bất kỳ thành phần nào — các thuật toán chạy ở đúng mặc định của
+firmware xuất xưởng.
+
+**Nó không có beamforming.** Beamforming và khử vang thuộc về ReSpeaker Mic Array v2.0 chứ không
+phải bản Lite. Đây là hạn chế đáng kể trong môi trường đông người: không có búp sóng định hướng thì
+không thể loại bỏ âm thanh theo *hướng*, nên một người nói chen vào chỉ bị suy giảm bởi NS và IC. Cả
+hai đều nhắm vào nhiễu tĩnh hoặc nhiễu dạng điểm, mà tiếng ồn đám đông — nhiều giọng nói chồng lên
+nhau — không thuộc loại nào. Tiếng ồn đám đông chiếm cùng dải phổ và cùng nhịp điều chế với tiếng nói
+đích, khiến nó là trường hợp khó nhất cho mọi bộ khử nhiễu đơn kênh.
+
+Bán kính thu 3m ở đây cũng vừa là ưu điểm vừa là gánh nặng. Trong đám đông, nó đảm bảo mic thu luôn
+cả đám đông, và các micro nằm trên board chứ không phải gần miệng, nên tỉ số tín hiệu trên nhiễu tại
+đầu thu phụ thuộc vào vị trí đeo thiết bị nhiều hơn bất kỳ khâu xử lý nào phía sau.
+
+#### 2.3.2. Ngưỡng
+
+`silero_vad.threshold` được đặt **0.6**, cao hơn mức mặc định 0.5 của Silero. Khuyến nghị của chính
+Silero là nâng ngưỡng trong điều kiện ồn để giảm báo động giả, và đây không phải thiết bị để bàn.
+Ngưỡng âm được suy ra bằng `threshold - 0.15`, nên cũng tăng lên 0.45 — tiếng nói phải "chắc" hơn cả
+khi bắt đầu lẫn khi duy trì một đoạn.
+
+Đây là điểm khởi đầu có lập luận, không phải giá trị tối ưu đã đo. Nó đánh đổi một phần độ nhạy với
+giọng nói nhỏ để lấy khả năng chống bị giữ mở bởi tiếng ồn nền, và giá trị đúng chỉ có thể đến từ các
+bản ghi thực hiện ở đúng nơi thiết bị được sử dụng.
+
+#### 2.3.3. Các Kiểu Hỏng Dự Kiến
+
+| Kiểu hỏng | Cơ chế | Biện pháp hiện có |
+|-----------|--------|-------------------|
+| Mọi lượt hỏi đều chạy tới giới hạn 12s | Tiếng ồn kéo dài giữ VAD ở trạng thái có tiếng nói nên không bao giờ kết thúc | Giới hạn cứng ở 2.2.3 giữ cho thiết bị không treo, nhưng tương tác trở nên chậm |
+| Câu hỏi bị cắt sớm | Tiếng ồn tụt xuống dưới ngưỡng âm trong lúc người dùng ngừng nghỉ | Tăng `--silence` |
+| Không thu được gì | Tiếng nói không vượt nổi mức 0.6 trên nền ồn | Timeout 6s không có tiếng nói sẽ hủy |
+| Trả lời sai một cách tự tin | STT trả về rác, VLM trả lời một câu hỏi chưa từng được đặt ra | Chưa có — xem bên dưới |
+
+Trường hợp cuối mới là điều đáng ngại. Mục 4.2.11 ghi nhận rằng output STT thoái hóa từng khiến VLM
+trả lời bằng tiếng Anh, và đó là lý do `VLM_LANG_SUFFIX` tồn tại; điều đó được đo trên đầu vào phòng
+yên tĩnh, nơi loại output như vậy là trường hợp hiếm. Trong đám đông nó trở thành trường hợp thường
+gặp, và hiện không có gì trong pipeline phân biệt được một bản chép sai với một bản chép đúng.
+ZipFormer-30M cũng là model nhỏ, mà ASR nhỏ suy giảm nhanh hơn model lớn khi gặp nhiễu.
+
+#### 2.3.4. Cần Đo Những Gì
+
+Các bản ghi từ đúng môi trường thiết bị hướng tới — đường phố, quán cà phê, chợ — rồi:
+
+- Tỉ lệ VAD kết thúc câu theo mức nền ồn, quét `threshold` trong khoảng 0.5-0.7
+- Tỉ lệ lượt hỏi chạm giới hạn 12s
+- Tỉ lệ lỗi từ (WER) của STT so với mốc phòng yên tĩnh
+- Liệu giá trị VNR mà XU316 xuất ra có dùng được như một cổng tin cậy hay không, để loại bỏ sớm một
+  bản chép vô vọng trước khi tốn ~21s cho VLM trả lời nó
 
 ---
 
@@ -393,6 +509,66 @@ trong suốt `infer()`, rồi khôi phục mask cũ sau đó.
 ##### 3.2.4.4. Kết Quả
 
 Đã migrate. Output 48 kHz, 14 voices, peak memory chưa bằng một nửa v2.
+
+---
+
+### 3.3. Mức Âm Lượng Phát
+
+Không có chỗ nào trong XEye đặt mức âm lượng đầu ra. `/tts` nhân tuyến tính output float của model
+lên int16 (`audio * 32767`), không chuẩn hóa và không giới hạn biên độ, nên mức tín hiệu số đúng bằng
+những gì model tạo ra cho câu đó, còn `aplay` chỉ ghi PCM xuống thiết bị mà không đụng tới độ lợi. Do
+đó âm lượng thực tế phụ thuộc hoàn toàn vào mixer ALSA của ReSpeaker đang được đặt ở mức nào.
+
+Mức này được chỉnh tay bằng `alsamixer -c <card ReSpeaker>`, và mixer đúng là tầng nên chỉnh:
+`pipeline.py` gọi card theo dạng `plughw:`, vốn đi vòng qua PulseAudio, nên một thay đổi ở mixer có
+tác dụng trực tiếp và không có gì ở tầng desktop định tuyến lại hay chỉnh tỉ lệ được.
+
+**`alsamixer` không lưu lại thay đổi ngay khi ta chỉnh.** `alsa-restore.service` khôi phục trạng thái
+lúc khởi động nhưng chỉ ghi ra qua `ExecStop`, tức khi tắt máy sạch sẽ. Một thiết bị chạy pin thường
+xuyên bị ngắt điện đột ngột — pin cạn, hoặc đơn giản là rút nguồn — và lần ghi đó không bao giờ xảy
+ra, nên mức âm lượng lặng lẽ quay về giá trị được lưu lần trước. `alsactl store` ghi
+`/var/lib/alsa/asound.state` ngay lập tức, và đó là thứ giúp thiết lập tồn tại qua các lần mất điện.
+
+Còn hai khoảng trống chưa xử lý. Mức âm lượng không tự thích nghi với môi trường, nên một thiết lập
+đủ nghe trong nhà có thể chìm mất giữa tiếng xe cộ — và khác với đường thu, ở đây không có bộ tự động
+điều chỉnh độ lợi nào để dựa vào, vì AGC của XU316 chỉ hoạt động trên micro. Người dùng cũng không thể
+đổi âm lượng nếu không có shell, đúng loại vấn đề mà nút nhấn đã giải quyết cho việc kích hoạt.
+
+### 3.4. Âm Báo Tương Tác
+
+Thiết bị không có màn hình, nên một người dùng không nhìn thấy nó thì cũng không có cách nào biết
+được nó đang nghe, đang xử lý, hay đã hỏng. Bốn âm báo được sinh ra để truyền tải trạng thái đó.
+
+| Âm báo | Phát khi | Âm thanh |
+|--------|----------|----------|
+| Ready | Vòng lặp nút nhấn khởi động, sau khi các model đã nạp xong | 600 → 900 → 1200Hz, 390ms |
+| Listening | Nút được nhấn, ngay trước khi mở micro | 800 → 1200Hz, 130ms |
+| Captured | VAD đã kết thúc câu hỏi (2.2) | 1200 → 800Hz, 130ms |
+| Error | Một lượt hỏi thất bại — không có tiếng nói, camera, hoặc server | 300Hz hai lần, 290ms |
+
+**Đi lên nghĩa là mở, đi xuống nghĩa là đóng.** Listening và captured là hai âm đối xứng gương một
+cách có chủ đích, để cặp âm này được ghi nhớ như một cử chỉ duy nhất bao lấy câu hỏi chứ không phải
+hai âm thanh rời rạc. Error thì thấp hơn và lặp hai lần chứ không phải một chuỗi đi lên hay đi xuống:
+một lỗi không nên nghe giống như một biến thể của thành công. Dải 800-1200Hz là nơi thính giác nhạy
+nhất và nằm trên dải ồn tần số thấp của giao thông, điều này quan trọng theo 2.3.
+
+Âm ready tồn tại vì 12.9s nạp model hoàn toàn im lặng, và một thiết bị đeo chưa khởi động xong thì
+không thể phân biệt được với một thiết bị đã hỏng.
+
+**Sinh ra chứ không phải file mẫu.** Các tông được tổng hợp bằng numpy rồi ghi vào `aplay` qua đúng
+đường PCM thô mà câu trả lời đi qua, ở cùng mức 48kHz, nên không có file âm thanh nào phải kèm theo
+và không phải resample. Mỗi đoạn có 5ms lên và xuống biên độ; một xung sin trần bắt đầu và kết thúc
+ở điểm gián đoạn và sẽ nghe rõ tiếng "cạch".
+
+**Âm listening chạy chặn.** Nó phải ra hết khỏi loa trước khi `arecord` mở micro, nếu không VAD sẽ
+tính tông đó là tiếng nói và kết thúc câu hỏi trước cả khi người dùng kịp nói. Bộ khử vọng âm của
+XU316 có thể triệt được nó, nhưng một tông thuần là trường hợp khó với bộ khử vọng vốn được tinh chỉnh
+cho tiếng nói, và chờ ~130ms rẻ hơn là đặt cược vào điều đó. Âm captured được phát sau khi bộ ghi đã
+đóng, cũng vì lý do tương tự.
+
+Các âm báo tuân theo `--no-play`, nên một lần chạy được yêu cầu im lặng sẽ im lặng, và việc một âm báo
+phát lỗi không bao giờ gây dừng chương trình — thiếu sound card chỉ làm giảm chất lượng tương tác chứ
+không kết thúc lượt hỏi.
 
 ---
 

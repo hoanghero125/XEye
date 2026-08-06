@@ -31,6 +31,7 @@ Camera ────→ Image input ────→ Vision Language Model
 | **GPU** | Adreno 643 |
 | **Camera** | Raspberry Pi Camera Module 2 (IMX219), CSI connector 1 — captured via GStreamer `qtiqmmfsrc` |
 | **Audio** | Seeed Studio ReSpeaker Lite (USB) — mic array + speaker out |
+| **Button** | PBS-33B 12mm momentary (2P, no LED, waterproof) across pin 13 (GPIO_24) and pin 14 (GND) of the 40-pin header, active-low on the internal pull-up |
 | **Power** | 3S2P Li-ion pack (6× 18650), 11.1V nominal, ~55.5 Wh — 1-2h under full load, 4-5h idle. Fed through a DC-DC module with USB-C PD output, since the board requires PD 3.0 at 12V/3A and will not boot without it |
 | **OS** | Ubuntu (Linux 6.8.0-1071-qcom) |
 
@@ -85,6 +86,8 @@ python server.py
 Models are split across two locations: the VLM and STT weights land in `models/` (~1.1GB), while the TTS ONNX graphs and the MOSS audio tokenizer go to the HuggingFace cache (`~/.cache/huggingface/hub`, ~286MB), where the `vieneu` package loads them from.
 
 > `setup.sh` installs `vieneu` with `--no-deps` — the package declares `gradio` as a hard dependency, which the board does not need. Its actual runtime requirements are listed in `requirements.txt`.
+
+> **Updating a board?** Follow [docs/board_checklist.md](docs/board_checklist.md) — dependency and model updates, the one-time button GPIO lookup, volume persistence, smoke tests and troubleshooting.
 
 ## Testing AI Services
 
@@ -185,7 +188,10 @@ v3 can also clone a voice from a 3–5s reference clip; XEye does not expose tha
 ## Demo
 
 ```bash
-# Full hardware loop: camera + ReSpeaker mic in, ReSpeaker speaker out
+# Device mode: press the button to ask, repeatedly (Ctrl-C to stop)
+python pipeline.py --button
+
+# One question, triggered from the terminal
 python pipeline.py
 
 # Wait longer before deciding the question ended, or keep the answer silent
@@ -199,6 +205,26 @@ python pipeline.py demo/audio/question.wav --image demo/images/IMG_6817.jpg
 With no arguments the pipeline records from the ReSpeaker mic array at 16kHz until you stop speaking, captures a frame from the camera, and plays the spoken answer back through the ReSpeaker's speaker. The ALSA device is located by card name, so it survives card-order changes. Either input can be overridden by passing a WAV path or `--image`.
 
 There is no fixed recording window — Silero VAD ends the question `--silence` seconds (default 0.8) after you stop talking, and only the trimmed speech is sent to `/stt`. Two guards bound it: `--max-record` (default 12s) caps a single question, and the pipeline gives up if nobody speaks within 6s. Raise `--silence` if it cuts you off mid-question; lower it if the wait after speaking feels long.
+
+`--button` is the mode the wearable actually runs in: it waits for a press, answers, and goes back to waiting, so no terminal is needed after startup. A press only ever means *start listening* — VAD ends the question, so the button is never held down. A failed query (no speech, camera hiccup, server restart) is reported and the loop keeps waiting rather than exiting.
+
+Since there is no screen, four short tones carry the state — rising means open, falling means closed:
+
+| Cue | Meaning |
+|---|---|
+| 600→900→1200Hz | Ready — models loaded, waiting for a press |
+| 800→1200Hz | Listening — speak now |
+| 1200→800Hz | Got it — question captured, working |
+| 300Hz ×2 | Failed — nothing was answered |
+
+Cues are suppressed by `--no-play` along with the answer.
+
+The button wires across **pin 13 (GPIO_24)** and **pin 14 (GND)** — adjacent on the header, so a 2-pin connector fits directly. Use the internal pull-up; if you add an external one it must be **≥50kΩ**, not the 10kΩ most tutorials specify, because of the board's level shifter. libgpiod addresses the line as chip + offset, which is neither the pin number nor the sysfs number (559) in RUBIK Pi's docs, so look it up once on the board and export it:
+
+```bash
+gpiofind GPIO_24                 # → "<chip> <offset>", if the device tree names its lines
+export XEYE_BUTTON_LINE=<offset> # required; --button refuses to start without it
+```
 
 The camera streams *while* the question is being asked and the frame is taken at the moment you stop speaking — so it is both correctly exposed and contemporaneous with the question, however short. The answer is synthesized one sentence ahead of playback, so speech starts after the first sentence rather than the whole reply.
 
@@ -286,6 +312,7 @@ xeye
 │  └─ video/                    # Generated MP4s for README
 ├─ docs
 │  ├─ bao_cao_ky_thuat.md       # Technical report (Vietnamese)
+│  ├─ board_checklist.md        # What to run on the board after pulling changes
 │  └─ technical_report.md       # Technical report (English)
 ├─ models                       # (not tracked — created by download_models.py)
 │  ├─ vintern/                  # Vintern-1B-v3_5 GGUF + mmproj F16

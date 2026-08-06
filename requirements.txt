@@ -22,6 +22,10 @@ soxr
 tokenizers>=0.20
 PyYAML
 
+# Button — libgpiod binding, used only by `pipeline.py --button`. v1 and v2 are both handled;
+# on Ubuntu the distro package (python3-libgpiod) works equally well.
+gpiod
+
 # API server
 fastapi
 uvicorn[standard]

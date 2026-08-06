@@ -34,7 +34,7 @@ TTS_RATE   = 48000        # what /tts returns
 # Silero VAD ends the recording when the speaker stops, replacing the old fixed window.
 VAD_MODEL      = ROOT / "models" / "vad" / "silero_vad.onnx"
 VAD_SILENCE    = 0.8    # trailing silence that ends the question
-VAD_THRESHOLD  = 0.5    # Silero default; raise toward 0.6 if ambient noise holds it in speech
+VAD_THRESHOLD  = 0.6    # above Silero's 0.5 default — the device is used in noise, see docs 2.3
 VAD_MIN_SPEECH = 0.25   # rejects coughs, door slams, mic knocks
 VAD_MAX_SPEECH = 8.0    # past this Silero raises its own threshold to 0.9 to force a split
 VAD_WINDOW     = 512    # 32ms at 16kHz — must be a trained size (512/1024/1536)
@@ -44,6 +44,69 @@ VAD_CORES      = {0, 1, 2, 3}  # A55 efficiency cores
 # held in speech by sustained noise would listen forever, so both guards are load-bearing.
 MAX_RECORD     = 12.0   # hard cap on one question
 SPEECH_TIMEOUT = 6.0    # give up if nobody speaks at all
+
+# ── Button ───────────────────────────────────────────────────────────────────
+# Momentary switch across physical pins 13 (GPIO_24) and 14 (GND) on the 40-pin header, read
+# active-low with the internal pull-up. Press means "start listening" — VAD decides when the
+# question ended, so the button is never held.
+#
+# libgpiod addresses lines as chip + offset, which is neither the physical pin number (13) nor
+# the sysfs number the vendor docs use (559). It is assigned by the kernel at boot, so it has
+# to come from the board:
+#
+#     gpiofind GPIO_24        # prints "<chip> <offset>" if the device tree names its lines
+#     gpioinfo                # otherwise, find it in the listing
+#
+# then export XEYE_BUTTON_LINE (and XEYE_BUTTON_CHIP if it is not gpiochip0).
+BUTTON_CHIP     = os.getenv("XEYE_BUTTON_CHIP", "/dev/gpiochip0")
+BUTTON_LINE     = os.getenv("XEYE_BUTTON_LINE")   # unset until confirmed on the board
+BUTTON_DEBOUNCE = 50    # ms
+
+
+# ── Audio cues ───────────────────────────────────────────────────────────────
+# The device has no screen, so every state the user needs to know is a sound. Rising means
+# "open" and falling means "closed", so listening and captured read as a matched pair
+# bracketing the question. Errors are deliberately lower and doubled — a failure should not
+# sound like a variant of success. 800-1200Hz is where hearing is most sensitive and rides
+# above low-frequency traffic noise.
+CUE_AMPLITUDE = 0.25
+CUE_RAMP_MS   = 5       # attack/release: a bare sine burst clicks at both ends
+CUES = {                # (Hz, ms) per segment; 0 Hz is a gap
+    "ready":     [(600, 90), (0, 40), (900, 90), (0, 40), (1200, 130)],
+    "listening": [(800, 60), (1200, 70)],
+    "captured":  [(1200, 60), (800, 70)],
+    "error":     [(300, 110), (0, 70), (300, 110)],
+}
+
+
+def beep(cue: str):
+    """Play an interaction cue, blocking until it finishes.
+
+    Blocking matters: the listening cue has to be out of the speaker before the microphone
+    opens, or the VAD scores it as speech. Never fatal — a device with no sound card should
+    still answer questions.
+    """
+    parts = []
+    for freq, ms in CUES[cue]:
+        n = int(TTS_RATE * ms / 1000)
+        if freq == 0:
+            parts.append(np.zeros(n, dtype=np.float32))
+            continue
+        t    = np.arange(n, dtype=np.float32) / TTS_RATE
+        tone = np.sin(2 * np.pi * freq * t)
+        ramp = min(max(1, int(TTS_RATE * CUE_RAMP_MS / 1000)), n // 2)
+        tone[:ramp]  *= np.linspace(0, 1, ramp)
+        tone[-ramp:] *= np.linspace(1, 0, ramp)
+        parts.append(tone)
+
+    pcm = (np.concatenate(parts) * CUE_AMPLITUDE * 32767).astype(np.int16)
+    try:
+        subprocess.run(
+            ["aplay", "-q", "-D", alsa_device(), "-f", "S16_LE",
+             "-r", str(TTS_RATE), "-c", "1", "-"],
+            input=pcm.tobytes(), check=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        pass
 
 
 def alsa_device() -> str:
@@ -77,7 +140,8 @@ def efficiency_cores():
         os.sched_setaffinity(0, prev)
 
 
-def record_question(path: str, silence: float = VAD_SILENCE, max_seconds: float = MAX_RECORD):
+def record_question(path: str, silence: float = VAD_SILENCE, max_seconds: float = MAX_RECORD,
+                    cues: bool = True):
     """Record until the speaker stops, using Silero VAD to find the end of the question.
 
     The old fixed window (`arecord -d N`) always waited the full N seconds and cut off anyone
@@ -103,6 +167,8 @@ def record_question(path: str, silence: float = VAD_SILENCE, max_seconds: float 
 
     dev = alsa_device()
     print(f"[mic] Listening on {dev} ... speak now", flush=True)
+    if cues:
+        beep("listening")   # finishes before the mic opens, so the VAD never hears it
     proc = subprocess.Popen(
         ["arecord", "-D", dev, "-f", "S16_LE", "-r", str(STT_RATE), "-c", "1", "-t", "raw"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -149,6 +215,8 @@ def record_question(path: str, silence: float = VAD_SILENCE, max_seconds: float 
         wf.setframerate(STT_RATE)
         wf.writeframes(pcm.tobytes())
     print(f"[mic] {len(pcm)/STT_RATE:.1f}s of speech  ({time.time()-t0:.1f}s listening)")
+    if cues:
+        beep("captured")    # after the recorder is closed, so it is not in the recording
 
 
 def play(path: str):
@@ -306,7 +374,7 @@ def run(audio_path: str | None, image_path: str | None, output_path: str | None 
         if audio_path is None:
             _tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             _tmp_wav.close()
-            record_question(_tmp_wav.name, silence, max_record)
+            record_question(_tmp_wav.name, silence, max_record, cues=playback)
             audio_path = _tmp_wav.name
 
         if cam is not None:
@@ -356,6 +424,72 @@ def run(audio_path: str | None, image_path: str | None, output_path: str | None 
         Path(_tmp_wav.name).unlink(missing_ok=True)
 
 
+def wait_for_button():
+    """Block until the button is pressed.
+
+    libgpiod 2 and 1 expose different APIs and the board's version is not pinned, so both are
+    handled — v2 debounces in the kernel, v1 has no such option and is debounced here.
+    """
+    import gpiod
+    from datetime import timedelta
+
+    if BUTTON_LINE is None:
+        raise RuntimeError(
+            "Button line not configured. Physical pin 13 is GPIO_24 (sysfs 559) on this board;\n"
+            "find its libgpiod offset with `gpiofind GPIO_24` (or `gpioinfo`), then:\n"
+            "    export XEYE_BUTTON_LINE=<offset>\n"
+            "    export XEYE_BUTTON_CHIP=/dev/gpiochipN   # only if not gpiochip0")
+    line_offset = int(BUTTON_LINE)
+
+    if hasattr(gpiod, "request_lines"):                      # libgpiod v2
+        settings = gpiod.LineSettings(
+            direction=gpiod.line.Direction.INPUT,
+            edge_detection=gpiod.line.Edge.FALLING,          # active-low: pressed pulls to GND
+            bias=gpiod.line.Bias.PULL_UP,
+            debounce_period=timedelta(milliseconds=BUTTON_DEBOUNCE))
+        with gpiod.request_lines(BUTTON_CHIP, consumer="xeye",
+                                 config={line_offset: settings}) as request:
+            request.wait_edge_events()
+            request.read_edge_events()
+    else:                                                    # libgpiod v1
+        chip = gpiod.Chip(BUTTON_CHIP)
+        line = chip.get_line(line_offset)
+        line.request(consumer="xeye", type=gpiod.LINE_REQ_EV_FALLING_EDGE,
+                     flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP)
+        try:
+            while not line.event_wait(timedelta(seconds=1)):
+                pass
+            line.event_read()
+            time.sleep(BUTTON_DEBOUNCE / 1000)
+        finally:
+            line.release()
+            chip.close()
+
+
+def serve(output_path: str | None, voice: str, silence: float, max_record: float,
+          playback: bool):
+    """Answer a question per button press, forever.
+
+    A failed query must not take the device down with it — a missed press, a camera hiccup or
+    a server restart should leave it waiting for the next press.
+    """
+    print(f"[button] {BUTTON_CHIP} line {BUTTON_LINE} (pin 13 / GPIO_24) — press to ask, "
+          f"Ctrl-C to stop\n")
+    if playback:
+        beep("ready")       # the only signal that the device finished booting
+    while True:
+        wait_for_button()
+        try:
+            run(None, None, output_path, voice, silence, max_record, playback)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            print(f"[error] {exc}")
+            if playback:
+                beep("error")
+        print("\n[button] Ready.\n")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="XEye demo pipeline")
@@ -374,6 +508,8 @@ def main():
     parser.add_argument("--max-record", type=float, default=MAX_RECORD, metavar="SECONDS",
                         help=f"Hard cap on a single question (default: {MAX_RECORD:.0f})")
     parser.add_argument("--no-play", action="store_true", help="Do not play the answer aloud")
+    parser.add_argument("--button", action="store_true",
+                        help="Wait for a button press and answer, repeatedly (Ctrl-C to stop)")
     args = parser.parse_args()
 
     # Explicit --output always wins; otherwise only dev mode writes anything.
@@ -384,6 +520,15 @@ def main():
     print(f"[pipeline] Audio:  {args.audio or mic}")
     print(f"[pipeline] Image:  {args.image or 'camera (qtiqmmfsrc)'}")
     print(f"[pipeline] Server: {SERVER}\n")
+
+    if args.button:
+        if args.audio or args.image:
+            parser.error("--button drives the live hardware; it cannot replay from files")
+        try:
+            serve(output, args.voice, args.silence, args.max_record, not args.no_play)
+        except KeyboardInterrupt:
+            print("\n[button] Stopped.")
+        return
 
     run(args.audio, args.image, output, args.voice, args.silence, args.max_record,
         not args.no_play)

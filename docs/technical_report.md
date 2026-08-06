@@ -13,9 +13,11 @@ All performance figures in this report were measured on the running server on 23
   - [1.1. Hardware](#11-hardware)
   - [1.2. Software](#12-software)
   - [1.3. Power](#13-power)
+  - [1.4. Button](#14-button)
 - [2. Speech-to-Text (STT)](#2-speech-to-text-stt)
   - [2.1. Model Used](#21-model-used)
   - [2.2. Voice Activity Detection (VAD)](#22-voice-activity-detection-vad)
+  - [2.3. Noisy Environments](#23-noisy-environments)
 - [3. Text-to-Speech (TTS)](#3-text-to-speech-tts)
   - [3.1. Model Used](#31-model-used)
   - [3.2. Experiment History](#32-experiment-history)
@@ -23,6 +25,8 @@ All performance figures in this report were measured on the running server on 23
     - [3.2.2. Experiment 2: Finding a Better Model](#322-experiment-2-finding-a-better-model)
     - [3.2.3. Experiment 3: Optimization](#323-experiment-3-optimization)
     - [3.2.4. Experiment 4: Migration to v3 Turbo](#324-experiment-4-migration-to-v3-turbo)
+  - [3.3. Playback Level](#33-playback-level)
+  - [3.4. Interaction Cues](#34-interaction-cues)
 - [4. Vision-Language Model (VLM)](#4-vision-language-model-vlm)
   - [4.1. Model Used](#41-model-used)
   - [4.2. Experiment History](#42-experiment-history)
@@ -64,6 +68,7 @@ All performance figures in this report were measured on the running server on 23
 | NPU | Hexagon 780 (V73), 12 TOPS |
 | Camera | Raspberry Pi Camera Module 2 (IMX219) on CSI connector 1, captured via GStreamer `qtiqmmfsrc` at 1280×720 NV12. Board requires a 22-pin 0.5mm FPC; standard variant only (no NoIR/wide-angle) |
 | Audio | Seeed Studio ReSpeaker Lite (USB) — mic array in, speaker out |
+| Button | PBS-33B 12mm momentary, 2P, no LED, waterproof — pins 13/14 of the 40-pin header, see 1.4 |
 | Power | 3S2P Li-ion pack, ~55.5 Wh, through a DC-DC module with USB-C PD output — see 1.3 |
 | OS | Ubuntu (Linux 6.8.0-1071-qcom) |
 
@@ -119,6 +124,54 @@ Measured runtime on this pack:
 Under continuous querying the four performance cores hold the throttled operating point described
 in 5.4, which is what separates the two figures.
 
+### 1.4. Button
+
+A press starts a query. Until this, the only trigger was running `pipeline.py` from a shell —
+which the device's own user cannot do.
+
+| Attribute | Value |
+|-----------|-------|
+| Switch | PBS-33B, 12mm panel mount, momentary, 2P, no LED, waterproof |
+| Rating | 1A/250V (mains-oriented; the actual load is microamps at 3.3V) |
+| Connection | Physical pin 13 (GPIO_24, sysfs 559) and pin 14 (GND), 40-pin LS header |
+| Logic | Active-low, internal pull-up, no external resistor |
+| Debounce | 50ms, in the kernel via libgpiod where available |
+| Filter | 100nF across the switch terminals |
+
+**Momentary, not latching, because VAD already owns the other end.** The press means only
+"start listening"; 2.2 decides when the question finished. Nothing is ever held down, which
+also suits a user who cannot see how long they are meant to hold it.
+
+**No external pull-up.** The header runs at 3.3V — the 1.8V level common on Qualcomm parts does
+not apply here — but the datasheet limits external pull-ups and pull-downs to **no less than
+50 kΩ**, a constraint of the on-board level shifter. The 10 kΩ that every Raspberry Pi tutorial
+specifies violates it by 5×. Using the SoC's internal pull-up avoids the question entirely.
+
+**Pin choice.** 28 of the 40 pins are GPIO-capable but most carry a default function — 2× I2C
+(including pins 3 and 5), 1× UART (pins 8 and 10, `/dev/ttyHS3`), 1× SPI (pins 19, 21, 23, 24),
+1× I2S and 1× PWM — leaving 9 free. Pin 13 is one of them, and pin 14 is ground (verified on the
+board, not assumed from the Raspberry Pi layout), so the two form a GPIO/ground pair sitting
+physically side by side and a 2-pin connector seats directly with no crossed wires.
+
+**Three numbering schemes describe the same pin, and none of them interchange.** Pin 13 is the
+physical position, `GPIO_24` is the board's signal name, and `559` is the global number the
+vendor documentation uses for the deprecated `/sys/class/gpio` interface. libgpiod wants none of
+these — it addresses a line as chip plus offset, assigned by the kernel at boot. That offset is
+resolved on the board with `gpiofind GPIO_24`, or from `gpioinfo` where the device tree does not
+name its lines, and supplied through `XEYE_BUTTON_LINE`. `pipeline.py` refuses to start in
+button mode until it is set rather than defaulting to a guess and waiting silently on the wrong
+line.
+
+**The 100nF filter earns its place twice.** Against the ~50 kΩ pull-up it forms a ~5ms RC,
+which both debounces in hardware and stops a long lead to a strap-mounted switch from
+false-triggering a high-impedance input. It also puts a small discharge spike across the
+contacts on each press, which matters because mains-rated contacts are not gold-plated and
+switching microamps is a dry-circuit condition where oxide films would otherwise build up.
+
+**It also turns `pipeline.py` into a loop.** `--button` waits for a press, answers, and returns
+to waiting, so the device needs no terminal after startup. A failed query is reported and the
+loop continues — on a wearable, a camera hiccup or a server restart must not end the session.
+
 ---
 
 ## 2. Speech-to-Text (STT)
@@ -166,7 +219,7 @@ when the speaker does, and only the trimmed speech segment reaches the STT model
 | Threads | 1 |
 | Cores | `{0,1,2,3}` — A55 efficiency cores |
 | Window size | 512 samples (32ms at 16kHz) |
-| Threshold | 0.5 |
+| Threshold | 0.6 (Silero default is 0.5 — see 2.3) |
 | Min speech duration | 0.25s |
 | Min silence duration | 0.8s |
 | Max speech duration | 8s |
@@ -219,6 +272,69 @@ than defensive:
 |-------|-------|-----------|
 | Hard cap | 12s | Flush the VAD, keep whatever speech it holds, stop |
 | No-speech timeout | 6s | Abort with an error rather than listen forever |
+
+---
+
+### 2.3. Noisy Environments
+
+**The audio input path has not been measured in noise.** Every figure in 2.1 and 2.2 comes from
+clean recordings — a 1.8s utterance in a quiet room. A device worn outdoors will not see that.
+This section records what the path relies on and what is expected to fail, so the gap is
+explicit rather than implied.
+
+#### 2.3.1. What the Hardware Provides
+
+The ReSpeaker Lite's XMOS XU316 runs acoustic echo cancellation, noise suppression, automatic
+gain control, interference cancellation and voice-to-noise ratio estimation, and is rated for
+far-field capture to 3m. XEye has never configured any of it — the algorithms run at whatever
+the shipped firmware defaults are.
+
+**It does not beamform.** Beamforming and dereverberation belong to the ReSpeaker Mic Array v2.0,
+not the Lite. This is the material limitation for crowded settings: without a steerable beam
+there is no rejection by *direction*, so a competing talker is attenuated only by NS and IC. Both
+target stationary or point-like noise, and babble — many overlapping voices — is neither. Babble
+occupies the same spectrum and the same modulation rates as the target speech, which makes it the
+hardest case for any single-channel suppressor.
+
+A 3m pickup radius is also as much liability as feature here. In a crowd it guarantees the array
+hears the crowd, and the microphones sit on the board rather than near the mouth, so the signal-to
+-noise ratio at the capsule is set by where the device is worn more than by anything downstream.
+
+#### 2.3.2. Threshold
+
+`silero_vad.threshold` is set to **0.6**, above Silero's 0.5 default. Silero's own guidance is to
+raise the threshold in noisy conditions to suppress false positives, and this device is not a
+desk accessory. The negative threshold derives as `threshold - 0.15`, so it rises to 0.45 with
+it — speech has to be more confident to start a segment and to sustain one.
+
+This is a reasoned starting point, not a measured optimum. It trades some sensitivity to quiet
+speech for resistance to being held open by background noise, and the correct value can only come
+from recordings made where the device is actually used.
+
+#### 2.3.3. Expected Failure Modes
+
+| Failure | Mechanism | Current mitigation |
+|---------|-----------|--------------------|
+| Every query runs to the 12s cap | Sustained noise holds the VAD in speech, so it never endpoints | The hard cap in 2.2.3 keeps the device alive, but the interaction is slow |
+| Question truncated early | Noise dips below the negative threshold during a pause | Raise `--silence` |
+| Nothing captured | Speech never clears 0.6 over the noise floor | 6s no-speech timeout aborts |
+| Confident wrong answer | STT returns garbage, the VLM answers a question that was never asked | None — see below |
+
+The last is the one that matters. 4.2.11 records that degenerate STT output made the VLM reply in
+English, which is why `VLM_LANG_SUFFIX` exists; that was measured on quiet-room inputs where such
+output was an edge case. In a crowd it becomes the normal case, and nothing in the pipeline
+currently distinguishes a transcript that is wrong from one that is right. ZipFormer-30M is also a
+small model, and small ASR degrades faster under noise than large.
+
+#### 2.3.4. What to Measure
+
+Recordings from the environments the device is meant for — a street, a café, a market — then:
+
+- VAD endpoint rate versus noise floor, sweeping `threshold` across 0.5-0.7
+- Proportion of queries reaching the 12s cap
+- STT word error rate against a clean-room baseline
+- Whether the XU316's VNR output is usable as a confidence gate, so a hopeless transcript can be
+  rejected before ~21s of VLM time is spent answering it
 
 ---
 
@@ -393,6 +509,66 @@ for the duration of `infer()`, restoring the previous mask afterwards.
 ##### 3.2.4.4. Results
 
 Migrated. 48 kHz output, 14 voices, less than half the peak memory of v2.
+
+---
+
+### 3.3. Playback Level
+
+Nothing in XEye sets the output volume. `/tts` scales the model's float output linearly to int16
+(`audio * 32767`) with no normalisation and no limiter, so the digital level is whatever the model
+produced for that utterance, and `aplay` writes the PCM to the device without touching gain.
+Loudness is therefore whatever the ReSpeaker's ALSA mixer happens to be set to.
+
+It is set by hand with `alsamixer -c <ReSpeaker card>`, and the mixer is the correct layer for it:
+`pipeline.py` addresses the card as `plughw:`, which bypasses PulseAudio entirely, so a mixer
+change applies directly and nothing at the desktop level can reroute or rescale it.
+
+**`alsamixer` does not persist the change when it is made.** `alsa-restore.service` restores state
+at boot but writes it out only from its `ExecStop`, on a clean shutdown. A device running from a
+battery pack is hard-powered-off routinely — the pack runs down, or power is simply pulled — and
+that write never happens, so the level silently reverts to whatever was last stored.
+`alsactl store` writes `/var/lib/alsa/asound.state` immediately, and is what makes a setting
+survive.
+
+Two gaps remain open. The level does not adapt to the environment, so a setting that carries
+indoors can be lost under traffic — and unlike the capture path there is no automatic gain to fall
+back on, since the XU316's AGC operates on the microphones only. The user also cannot change the
+volume without a shell, which is the same class of problem the button solved for triggering.
+
+### 3.4. Interaction Cues
+
+The device has no screen, so a user who cannot see it has no way to tell whether it is
+listening, working, or broken. Four generated cues carry that state.
+
+| Cue | Fires when | Sound |
+|-----|------------|-------|
+| Ready | The button loop starts, after models have loaded | 600 → 900 → 1200Hz, 390ms |
+| Listening | The button is pressed, before the microphone opens | 800 → 1200Hz, 130ms |
+| Captured | VAD has ended the question (2.2) | 1200 → 800Hz, 130ms |
+| Error | A query failed — no speech, camera, or server | 300Hz twice, 290ms |
+
+**Rising means open, falling means closed.** Listening and captured are deliberate mirror images
+so the pair is learned as a single gesture bracketing the question rather than as two unrelated
+sounds. Error is lower and doubled rather than a chirp at all: a failure should not sound like a
+variant of success. The 800-1200Hz band is where hearing is most sensitive and sits above
+low-frequency traffic noise, which matters given 2.3.
+
+Ready exists because the 12.9s of model loading is otherwise silent, and a wearable that has not
+finished booting is indistinguishable from one that is broken.
+
+**Generated, not sampled.** The tones are synthesised with numpy and written to `aplay` through
+the same raw-PCM path as the answer at the same 48kHz, so there are no audio assets to ship and
+no resampling. Each segment carries a 5ms attack and release; a bare sine burst starts and ends
+on a discontinuity and clicks audibly.
+
+**The listening cue blocks.** It has to be out of the speaker before `arecord` opens the
+microphone, or the VAD scores the tone as speech and ends the question before the user has
+spoken. The XU316's echo canceller might suppress it, but a pure tone is an awkward case for a
+canceller tuned on speech, and ~130ms of waiting is cheaper than depending on it. Captured is
+played after the recorder has closed, for the same reason.
+
+Cues follow `--no-play`, so a run asked to stay silent stays silent, and a cue that fails to play
+is never fatal — a missing sound card degrades the interaction rather than ending the query.
 
 ---
 
