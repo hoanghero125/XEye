@@ -5,7 +5,7 @@
 
 XEye is a wearable, on-device AI assistant for the visually impaired, built on [Qualcomm Dragonwing™ QCS6490](https://www.qualcomm.com/internet-of-things/products/q6-series/qcs6490) Platform - [Thundercomm RUBIK Pi 3](https://rubikpi.ai/).
 
-**Technical Notes:** [English](docs/technical_report.md) · [Tiếng Việt](docs/bao_cao_ky_thuat.md) *(Last updated: 07/08/2026)*
+**Technical Notes:** [English](docs/technical_report.md) · [Tiếng Việt](docs/bao_cao_ky_thuat.md) *(Last updated: 15/08/2026)*
 
 ## Pipeline
 
@@ -29,7 +29,7 @@ Camera ────→ Image input ────→ Vision Language Model
 | **RAM** | 8GB LPDDR4x |
 | **NPU** | Hexagon 780 (V73) — 12 TOPS |
 | **GPU** | Adreno 643 |
-| **Camera** | Raspberry Pi Camera Module 2 (IMX219), CSI connector 1 — captured via GStreamer `qtiqmmfsrc` |
+| **Camera** | Raspberry Pi Camera Module 3 (IMX708), CSI connector 1 — captured via GStreamer `qtiqmmfsrc`. Substituted after the Module 2 stopped probing; autofocus is unsupported on this board |
 | **Audio** | Seeed Studio ReSpeaker Lite (USB) — mic array + speaker out |
 | **Button** | PBS-33B 12mm momentary (2P, no LED, waterproof) across pin 13 (GPIO_24) and pin 14 (GND) of the 40-pin header, active-low on the internal pull-up |
 | **Power** | 3S2P Li-ion pack (6× 18650), 11.1V nominal, ~55.5 Wh — 1-2h under full load, 4-5h idle. Fed through a DC-DC module with USB-C PD output, since the board requires PD 3.0 at 12V/3A and will not boot without it |
@@ -128,7 +128,9 @@ python scripts/camera_preview.py
 python scripts/camera_preview.py --ev 4 --rotate 90    # brighter, and rotated if side-mounted
 ```
 
-Capture uses `exposure-compensation=2` (range −12..12) — measured on this board, +2 lifts a dim indoor scene from mean brightness 122 to 138, while +4 and +6 blow out 22%/29% of pixels. Auto-exposure needs ~5 frames to settle, so the first moment of any stream or capture is dark. Only one viewer at a time: the camera allows a single consumer.
+Capture uses `exposure-compensation=2` (range −12..12). On the IMX708 there is headroom above that: +2 and +4 measured 126.9 and 133.7 mean brightness with *identical* contrast (44.1 vs 44.7) and only 4.2%/5.8% blown pixels. The earlier 22%/29% figures were the IMX219 and do not carry over — this setting is sensor-specific. Exposure stays on auto rather than pinning the shutter: a fixed shutter would cut motion blur but costs ~7.6 stops of adaptation between indoors and sunlight, and a blown frame describes worse than a soft one. Auto-exposure needs ~5 frames to settle, so the first moment of any stream is dark. Only one viewer at a time: the camera allows a single consumer.
+
+> Requesting an unsupported mode **crashes `cam-server`** rather than erroring — 960×720 and 1920×1080 both do. Stay on 1280×720. Requesting 4:3 also crops ~33% of the horizontal field rather than adding view.
 
 ## API Server
 
@@ -219,11 +221,17 @@ Since there is no screen, four short tones carry the state — rising means open
 
 Cues are suppressed by `--no-play` along with the answer.
 
-The button wires across **pin 13 (GPIO_24)** and **pin 14 (GND)** — adjacent on the header, so a 2-pin connector fits directly. Use the internal pull-up; if you add an external one it must be **≥50kΩ**, not the 10kΩ most tutorials specify, because of the board's level shifter. libgpiod addresses the line as chip + offset, which is neither the pin number nor the sysfs number (559) in RUBIK Pi's docs, so look it up once on the board and export it:
+The button wires across **pin 13 (GPIO_24)** and **pin 14 (GND)** — adjacent on the header, so a 2-pin connector fits directly. Use the internal pull-up; if you add an external one it must be **≥50kΩ**, not the 10kΩ most tutorials specify, because of the board's level shifter.
+
+libgpiod addresses the line as chip + offset. Both were confirmed on this board and are now the defaults, so nothing needs exporting: **`/dev/gpiochip4` offset 24** (`f100000.pinctrl`, the SoC TLMM — *not* `gpiochip0`, which is a PMIC). Ignore the sysfs number in RUBIK Pi's docs (559): it assumes a TLMM base of 535, while this kernel uses 547, putting the same pin at 571. `XEYE_BUTTON_CHIP` / `XEYE_BUTTON_LINE` override them if a board differs.
+
+GPIO chips are root-only and the board has no `gpio` group, so grant access once before using `--button`:
 
 ```bash
-gpiofind GPIO_24                 # → "<chip> <offset>", if the device tree names its lines
-export XEYE_BUTTON_LINE=<offset> # required; --button refuses to start without it
+sudo groupadd -f gpio && sudo usermod -aG gpio $USER
+echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/60-gpio.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
 The camera streams *while* the question is being asked and the frame is taken at the moment you stop speaking — so it is both correctly exposed and contemporaneous with the question, however short. The answer is synthesized one sentence ahead of playback, so speech starts after the first sentence rather than the whole reply.
@@ -245,7 +253,7 @@ export XEYE_MODE=prod                   # this shell / service
 
 Passing `--output PATH` always saves, even in prod, for one-off debugging.
 
-Without `--image`, `pipeline.py` grabs one 1280×720 frame from the Camera Module 2 through GStreamer (`qtiqmmfsrc camera=0`) before running the pipeline — this requires the Qualcomm camera stack on the board. It records a short burst and keeps the newest frame, since auto-exposure needs a moment to settle. Output is written to `data/audio/output.wav` by default (`--output` to change it).
+Without `--image`, `pipeline.py` streams 1280×720 from the camera through GStreamer (`qtiqmmfsrc camera=0`) for the duration of the question — this requires the Qualcomm camera stack on the board. It keeps a 10-frame ring buffer and picks the **sharpest** frame, not the newest: motion blur rises and falls through a walking gait, so a ~333ms window usually holds a stiller moment than its last frame. Scoring all 10 costs 43ms. Output is written to `data/audio/output.wav` by default (`--output` to change it).
 
 > The board's CSI port takes a **22-pin 0.5mm FPC** (Raspberry Pi 5 style). Camera Module 2's stock 15-pin cable does not fit. Only the standard Module 2/3 are supported — not the NoIR or wide-angle variants. Never connect or disconnect the camera while the board is powered.
 

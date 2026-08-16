@@ -20,7 +20,7 @@ python server.py                  # wait for "All models ready"
 python pipeline.py --button
 ```
 
-`XEYE_BUTTON_LINE` must already be exported, and the volume already stored. If either is fresh,
+GPIO access must already be granted (step 3) and the volume already stored. If either is fresh,
 work through the full list below.
 
 ---
@@ -44,19 +44,31 @@ python download_models.py
 Idempotent; each section skips if the files are already present. Silero VAD (629KB) is the
 recent addition and lands in `models/vad/`.
 
-## 3. Find the button's GPIO line
+## 3. Grant GPIO access
 
-Once per board. libgpiod addresses a line as chip + offset, which is **neither** the physical pin
-number (13) **nor** the sysfs number the vendor docs use (559). `--button` refuses to start until
-this is set, rather than waiting silently on a guessed line.
+Once per board. The line address itself no longer needs looking up — it was resolved on this
+hardware and is now the default: **`/dev/gpiochip4` offset 24** (`f100000.pinctrl`, the SoC
+TLMM). `XEYE_BUTTON_CHIP` / `XEYE_BUTTON_LINE` still override it if a board differs.
+
+What *does* need doing is permissions. `/dev/gpiochip*` is `crw------- root root` and the board
+has no `gpio` group, so `--button` fails with `Permission denied` until:
 
 ```bash
-gpiofind GPIO_24                    # → "<chip> <offset>"; fall back to `gpioinfo`
-export XEYE_BUTTON_LINE=<offset>
-export XEYE_BUTTON_CHIP=/dev/gpiochipN   # only if not gpiochip0
+sudo groupadd -f gpio && sudo usermod -aG gpio $USER
+echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/60-gpio.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Put both in `~/.bashrc` or the PM2 environment so they survive a reboot.
+Log out and back in for the group to apply. `pipeline.py` checks this at startup and prints the
+same commands rather than failing on the first press.
+
+> **Do not use `gpiofind`.** The gpiod CLI tools are not installed, and no chip exposes line
+> names anyway — the device tree sets no `gpio-line-names`. Do not derive the offset from the
+> vendor's sysfs number (559) either: it assumes a TLMM base of 535 where this kernel uses 547,
+> so that arithmetic gives 12, which is a different and also-free line that fails silently. The
+> authority is `sudo cat /sys/kernel/debug/pinctrl/f100000.pinctrl/pinmux-pins`, which names the
+> pins directly (`pin 24 (GPIO_24)`).
 
 ## 4. Set and persist the volume
 
@@ -122,8 +134,8 @@ cues and speech is wrong rather than the overall level, move `CUE_AMPLITUDE` at 
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| `--button` exits with "Button line not configured" | `XEYE_BUTTON_LINE` unset | Step 3 |
-| Button does nothing, no error | Wrong line offset, or the switch is not across pins 13/14 | Re-check with `gpioinfo`; confirm continuity across the switch |
+| `--button` exits with "No access to /dev/gpiochip4" | udev rule / gpio group not set up | Step 3 |
+| Button does nothing, no error | Wrong line offset, or the switch is not across pins 13/14 | Confirm continuity across the switch; sweep the free TLMM lines while pressing (see below) |
 | Every question hits `Hit the 12s cap` | Background noise holds the VAD open | Technical report 2.3; raise `VAD_THRESHOLD` |
 | `No speech in 6s` but the mic works | ReSpeaker not enumerating — `alsa_device()` falls back to `default` and listens to the wrong card | `cat /proc/asound/cards`, confirm ReSpeaker is present |
 | Question cut off mid-sentence | Endpoint too aggressive | `--silence 1.0` |
@@ -132,20 +144,62 @@ cues and speech is wrong rather than the overall level, move `CUE_AMPLITUDE` at 
 | No audio at all | Wrong card, or muted in the mixer | `alsamixer -c <ReSpeaker>`, unmute with `m` |
 | `Camera capture failed — no frame written` | CSI camera not detected | `dmesg \| grep 'Probe success'`; never hot-plug the camera |
 
+### Finding the button line empirically
+
+If the button is wired but the configured offset is wrong, this sweeps every free TLMM line
+while you press and reports which one moves. Each press and release is one transition, so press
+several times — a line reporting a single transition is floating, not the switch.
+
+```bash
+sudo python - <<'EOF'
+import gpiod, time
+from gpiod.line import Direction, Bias
+CHIP = '/dev/gpiochip4'
+c = gpiod.Chip(CHIP); free = [o for o in range(c.get_info().num_lines)
+                              if not c.get_line_info(o).used]; c.close()
+reqs, base, hits = [], {}, {}
+for i in range(0, len(free), 60):          # a request is capped at 64 lines
+    batch = free[i:i+60]
+    r = gpiod.request_lines(CHIP, consumer='xeye-scan', config={
+        o: gpiod.LineSettings(direction=Direction.INPUT, bias=Bias.PULL_UP) for o in batch})
+    reqs.append((r, batch))
+    base.update({o: r.get_value(o) for o in batch})
+print('press the button repeatedly for 20s'); t0 = time.time()
+while time.time() - t0 < 20:
+    for r, batch in reqs:
+        for o in batch:
+            v = r.get_value(o)
+            if v != base[o]: hits[o] = hits.get(o, 0) + 1; base[o] = v
+    time.sleep(0.005)
+for r, _ in reqs: r.release()
+print(sorted(hits.items(), key=lambda kv: -kv[1]) or 'no line moved')
+EOF
+```
+
 ---
 
-## Untested on hardware
+## Hardware verification status
 
-The VAD, rolling camera, button and cue code has been written and verified as far as a
-non-Linux machine allows — it compiles, and the cue waveforms were checked for clipping and
-click-free edges — but **none of it has run on the board**.
+Checked on the board 07-15/08/2026. All three original suspicions are resolved:
 
-The likeliest failure points:
+| Item | Status |
+|------|--------|
+| `sherpa_onnx` VAD API vs pinned `1.13.2` | ✅ works — endpointed real speech at `1.1s of speech (4.3s listening)` |
+| libgpiod major version | ✅ v2 (`gpiod 2.5.0`), so the `request_lines` path is the live one |
+| `RollingCamera` ring buffer on `/dev/shm` | ✅ works — streams, buffers and grabs; sharpest-frame selection scores 10 frames in 43ms |
+| Cues (`listening`, `captured`) | ✅ audible during the VAD test |
+| Button and `ready` / `error` cues | ⏸ not wired yet |
 
-- the `sherpa_onnx` VAD API against the pinned `1.13.2`
-- `RollingCamera` writing its ring buffer to `/dev/shm`
-- which libgpiod major version is installed (both v1 and v2 are handled, but only one is real here)
+**The camera module was replaced.** The Module 2 stopped answering I2C entirely (`read id: 0x0`,
+zero `Probe success`, NACK on both connectors) with no software change — a hardware fault in the
+module or its ribbon. A Module 3 (IMX708) on the same connector probed immediately. Consequences
+to know when testing:
 
-Those three fail loudly. **The cues fail quietly by design** — `beep()` swallows errors so a
-missing sound card can never end a query. So silence from the cues means checking `aplay` and the
-mixer, not that the tone generation was wrong.
+- **Autofocus does not work** on the Module 3 and cannot be enabled — no actuator driver is bound.
+  Focus sits at the lens's unpowered rest position, which happens to be usefully far on this unit.
+- **Frames arrive rotated 180°** with the current mounting. Not yet corrected in the capture path.
+- The near limit is ~1.3m against the Module 2's ~0.8m.
+
+**The cues fail quietly by design** — `beep()` swallows errors so a missing sound card can never
+end a query. So silence from the cues means checking `aplay` and the mixer, not that the tone
+generation was wrong.

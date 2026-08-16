@@ -1,6 +1,6 @@
 # Báo Cáo Kỹ Thuật: XEye
 
-**Cập nhật lần cuối:** 07/08/2026  
+**Cập nhật lần cuối:** 15/08/2026  
 **Tác giả:** Đỗ Phạm Bảo Hoàng
 
 Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên server đang chạy ngày 23-24/07/2026 (RUBIK Pi 3, trạng thái warm — request đầu tiên sau khi khởi động server luôn chậm hơn).
@@ -47,6 +47,7 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
   - [5.3. Độ Trễ End-to-End](#53-độ-trễ-end-to-end)
   - [5.4. Hành Vi Nhiệt](#54-hành-vi-nhiệt)
   - [5.5. Chụp Ảnh Từ Camera](#55-chụp-ảnh-từ-camera)
+    - [5.5.1. Thay Module: IMX219 → IMX708](#551-thay-module-imx219--imx708)
   - [5.6. Chế Độ Chạy](#56-chế-độ-chạy)
 - [6. Tổng kết](#6-tổng-kết)
   - [6.1. Mô Hình Được Chọn](#61-mô-hình-được-chọn)
@@ -66,7 +67,7 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
 | CPU | 4× Cortex-A55 @1.96GHz + 3× Cortex-A78 @2.40GHz + 1× Cortex-X1 @2.71GHz |
 | GPU | Adreno 643 |
 | NPU | Hexagon 780 (V73), 12 TOPS |
-| Camera | Raspberry Pi Camera Module 2 (IMX219) trên CSI connector 1, chụp qua GStreamer `qtiqmmfsrc` ở 1280×720 NV12. Board yêu cầu FPC 22-pin 0.5mm; chỉ hỗ trợ bản standard (không hỗ trợ NoIR/wide-angle) |
+| Camera | Raspberry Pi Camera Module 3 (IMX708) trên CSI connector 1, chụp qua GStreamer `qtiqmmfsrc` ở 1280×720 NV12. Thay thế sau khi Module 2 không còn probe được (5.5.1); board không hỗ trợ autofocus. Yêu cầu FPC 22-pin 0.5mm; chỉ hỗ trợ bản standard (không hỗ trợ NoIR/wide-angle) |
 | Audio | Seeed Studio ReSpeaker Lite (USB) — mic array vào, speaker ra |
 | Nút nhấn | PBS-33B 12mm loại nhấn nhả, 2P, không đèn, chống nước — chân 13/14 của header 40 pin, xem 1.4 |
 | Nguồn | Pack Li-ion 3S2P, ~55.5 Wh, qua module DC-DC có ngõ ra USB-C PD — xem 1.3 |
@@ -134,7 +135,8 @@ Một cú nhấn bắt đầu một lượt hỏi. Trước đó, cách kích ho
 |------------|---------|
 | Loại công tắc | PBS-33B, gắn panel 12mm, nhấn nhả, 2P, không đèn, chống nước |
 | Thông số | 1A/250V (dành cho điện lưới; tải thực tế chỉ vài microampe ở 3.3V) |
-| Kết nối | Chân vật lý 13 (GPIO_24, sysfs 559) và chân 14 (GND), header LS 40 pin |
+| Kết nối | Chân vật lý 13 (GPIO_24) và chân 14 (GND), header LS 40 pin |
+| Địa chỉ line | `/dev/gpiochip4` (`f100000.pinctrl`) offset 24 |
 | Mức logic | Active-low, dùng pull-up nội, không cần điện trở ngoài |
 | Debounce | 50ms, thực hiện trong kernel qua libgpiod nếu có |
 | Lọc nhiễu | Tụ 100nF mắc song song hai chân công tắc |
@@ -157,10 +159,34 @@ GPIO/ground nằm sát cạnh nhau và đầu nối 2 chân cắm thẳng vào �
 **Có ba hệ đánh số cùng mô tả một chân, và chúng không thay thế cho nhau được.** 13 là vị trí vật lý,
 `GPIO_24` là tên tín hiệu của board, còn `559` là số toàn cục mà tài liệu nhà sản xuất dùng cho giao
 diện `/sys/class/gpio` đã lỗi thời. libgpiod không dùng số nào trong đó — nó định danh một line bằng
-chip cộng offset, do kernel gán lúc khởi động. Offset đó được tra trên board bằng `gpiofind GPIO_24`,
-hoặc từ `gpioinfo` nếu device tree không đặt tên cho các line, rồi truyền vào qua `XEYE_BUTTON_LINE`.
-`pipeline.py` từ chối khởi động ở chế độ nút nhấn cho tới khi biến này được đặt, thay vì lấy một giá
-trị đoán mò rồi ngồi chờ im lặng trên sai line.
+chip cộng offset.
+
+Cả hai giá trị đã được tra trực tiếp trên board từ bảng chân của chính kernel, nơi các chân TLMM
+được đặt tên rõ ràng:
+
+```
+$ sudo cat /sys/kernel/debug/pinctrl/f100000.pinctrl/pinmux-pins
+pin 24 (GPIO_24): (MUX UNCLAIMED) (GPIO UNCLAIMED)
+```
+
+Vậy `GPIO_24` là **offset 24** trên `/dev/gpiochip4` — `f100000.pinctrl`, tức TLMM của SoC, 176 line.
+Tuyệt đối không phải `gpiochip0`, vốn là một PMIC (`c440000.spmi:pmic@8`) chỉ có 12 line và không liên
+quan gì tới header 40 chân.
+
+**Số sysfs của nhà sản xuất gây hiểu nhầm trên kernel này.** Con số 559 giả định TLMM có base 535;
+kernel này đặt base của cùng chip đó ở 547, khiến GPIO_24 nằm ở 571. Do đó, nếu lấy số sysfs trong tài
+liệu trừ đi base đang chạy để suy ra offset thì sẽ ra 12 — sai line, mà line đó cũng đang trống nên sẽ
+hỏng một cách im lặng chứ không báo lỗi. Chip cộng offset ổn định qua các kernel còn số sysfs toàn cục
+thì không; bảng chân ở trên mới là căn cứ, không phải phép trừ trên 559.
+
+**`gpiofind` không dùng được ở đây.** Bộ công cụ dòng lệnh gpiod không được cài, và dù có cài thì cũng
+không chip nào expose tên line — device tree không đặt `gpio-line-names`, nên cả sáu chip đều báo 0
+line có tên. Bảng pinctrl ở trên là một ánh xạ riêng mà `gpiofind` không đọc tới.
+
+**Truy cập GPIO cần cấu hình thêm.** `/dev/gpiochip*` có quyền `crw------- root root` và board không
+có group `gpio`, nên chế độ nút nhấn sẽ lỗi `Permission denied` trên một board chưa chuẩn bị. Một udev
+rule kèm quyền group cấp được quyền này mà không phải chạy cả pipeline dưới root; `pipeline.py` kiểm
+tra quyền truy cập ngay lúc khởi động và in ra cách khắc phục, thay vì hỏng ở lần nhấn đầu tiên.
 
 **Tụ 100nF có ích ở hai mặt.** Kết hợp với pull-up ~50 kΩ, nó tạo thành mạch RC ~5ms, vừa debounce
 bằng phần cứng vừa ngăn một sợi dây dài chạy tới nút gắn trên quai đeo gây kích hoạt nhầm ở một ngõ
@@ -1129,8 +1155,8 @@ Khung hình được chụp bằng GStreamer `qtiqmmfsrc` ở 1280×720 NV12 (`R
 làm này.
 
 **Auto-exposure cần thời gian để ổn định.** Những khung hình đầu của mọi luồng đều tối — cần khoảng
-5 frame thì AE mới hội tụ. Vì vậy stream được giữ mở suốt câu hỏi, ghi vào một ring buffer 5 frame,
-và frame *mới nhất* được lấy ngay khi người nói dừng. Lấy frame đầu tiên đồng nghĩa với việc lấy mẫu
+5 frame thì AE mới hội tụ. Vì vậy stream được giữ mở suốt câu hỏi, ghi vào một ring buffer 10 frame,
+và một frame được lấy ngay khi người nói dừng. Lấy frame đầu tiên đồng nghĩa với việc lấy mẫu
 giữa lúc cảm biến còn đang hội tụ.
 
 Cách này thay cho kiểu chụp một lần với ~2s warmup trước đây, vốn chỉ an toàn khi việc ghi âm dùng
@@ -1143,23 +1169,96 @@ tụ, và mức chờ này được chặn sàn ở ~2s.
 Ring buffer được ghi vào tmpfs nếu có. Ở 30fps, một câu hỏi dài là vài MB JPEG, và chỗ đó không nên
 là flash của board — xem 5.6 để biết vì sao điều này quan trọng.
 
-**Exposure mặc định quá tối khi ở trong nhà.** `exposure-compensation` nhận giá trị −12..12; đo trên
-board này với một cảnh trong nhà thiếu sáng:
+**Chọn frame nét nhất trong buffer, không phải frame mới nhất.** Độ nhòe do chuyển động tỉ lệ với
+vận tốc góc tức thời của camera, vốn lên xuống theo nhịp bước chân, nên một cửa sổ trải dài một phần
+sải bước thường chứa một khoảnh khắc đứng yên hơn so với frame cuối cùng của nó. Mỗi frame được chấm
+điểm bằng phương sai của Laplacian trên bản decode nháp tỉ lệ ¼ — nhòe là đặc tính tần số thấp nên
+vẫn tồn tại sau khi thu nhỏ, do đó chấm ở 320×180 vẫn chính xác tương đương mà nhanh hơn khoảng mười
+lần.
 
-| exposure-compensation | Kết quả |
-|-----------------------|---------|
-| 0 | độ sáng trung bình 122 |
-| **+2** | **độ sáng trung bình 138 — không cháy sáng** |
-| +4 | 22% pixel bị cháy sáng |
-| +6 | 29% pixel bị cháy sáng |
+| Phép đo | Kết quả |
+|---------|---------|
+| Khả năng phân biệt (ảnh nét vs bản làm mờ Gaussian) | 1263 vs 160 — **7.9×** |
+| Chi phí chấm điểm 10 frame | **43ms** (so với lời gọi VLM ~18s) |
+| Camera đứng yên (không có gì để cải thiện) | chọn frame 1.00× so với frame mới nhất — không gây hại |
+| Burst mô phỏng, frame nét nằm ở vị trí 7 | chọn đúng frame đó, nét hơn frame mới nhất **17.69×** |
 
-→ **`EXPOSURE = 2`.** Mức này lấy lại được chi tiết vùng tối mà không làm cháy vùng sáng; từ +4 trở
-lên chỉ là đổi lỗi này lấy lỗi kia.
+Độ sâu buffer là 10 frame, ~333ms ở 30fps: đủ rộng để trải một phần chu kỳ bước chân mà khung hình
+vẫn cùng thời điểm với câu hỏi. Frame không đọc được bị chấm 0 điểm nên không bao giờ thắng, và nếu
+mọi frame đều hỏng thì dùng frame mới nhất — một lần ghi dở dang không được phép làm hỏng cả truy vấn.
+
+**Exposure.** `exposure-compensation` nhận giá trị −12..12. IMX708 chịu được mức bù này tốt hơn nhiều
+so với IMX219; đo trên cùng một cảnh trong nhà:
+
+| exposure-compensation | Độ sáng | Tương phản | Cháy sáng |
+|-----------------------|---------|------------|-----------|
+| +2 | 126.9 | 44.1 | 4.2% |
+| **+4** | **133.7** | **44.7** | 5.8% |
+| +6 | — | 31 | — |
+
+→ **`EXPOSURE = 2`.** Các con số của IMX219 khắc nghiệt hơn nhiều (+4 làm cháy 22% pixel), nên thiết
+lập này phụ thuộc cảm biến và đã phải đo lại khi đổi module. Trên IMX708 vẫn còn dư địa trên mức 2:
+tương phản giữ nguyên tới +4 và chỉ bẹt đi trong khoảng từ +4 tới +6.
+
+**Exposure giữ ở chế độ auto — không ghim tốc màn trập.** Rút ngắn màn trập sẽ giảm nhòe: 10ms với
+ISO 1600 đo được độ sáng y hệt (132.2 so với 129.9) và nhiễu y hệt (0.76 so với 0.77) với màn trập
+ngắn hơn 3.3×, và ở đây đánh đổi nhiễu lại đặc biệt có lợi vì việc thu nhỏ về 448×448 trung bình hóa
+nhiễu nhưng không thể gỡ được nhòe. Dù vậy phương án này vẫn bị loại. Ghim cả màn trập lẫn gain sẽ
+mất ~7.6 stop khả năng thích ứng giữa một căn phòng 400 lux và nắng 80.000 lux; ra ngoài trời khung
+hình sẽ trắng xóa mà không còn cơ chế nào cứu vãn. Ảnh nhòe vẫn mô tả được, ảnh cháy thì không — và
+với một thiết bị hỗ trợ di chuyển, ngoài trời không phải trường hợp hiếm.
+
+**Độ phân giải và tỉ lệ khung hình không phải là đòn bẩy.** Model chỉ nhìn thấy một tile 448×448 cố
+định bất kể input (4.2.10), thời gian encode phẳng so với kích thước input, và tiền xử lý phía server
+chỉ tốn 10ms. 1280×720 nằm trên 448 ở cả hai chiều nên không có gì bị phóng to, và việc thu nhỏ từ đó
+cho khử răng cưa miễn phí. Yêu cầu 4:3 (1280×960) không mở rộng tầm nhìn — nó **cắt mất ~33% chiều
+ngang**, đo bằng cách so sánh bề rộng pixel của một vật mốc giữa hai chế độ. Một thiết bị đeo không
+nên đánh đổi tầm quan sát ngoại vi để giảm một chút méo do bóp tỉ lệ.
+
+> **Số chế độ được hỗ trợ rất hẹp và lỗi rất nặng.** 960×720 và 1920×1080 đều làm **crash
+> `cam-server`** thay vì báo lỗi; systemd khởi động lại sau ~2s nhưng lần chụp đó mất trắng và Ubuntu
+> hiện thông báo crash. Hãy giữ nguyên 1280×720.
 
 **Chỉ một consumer.** Camera chỉ cho phép một tiến trình đọc, nên việc chụp ảnh và
 `scripts/camera_preview.py` không thể chạy đồng thời. Server preview theo dõi tiến trình
 `gst-launch-1.0` đang sống và kill nó khi có viewer mới kết nối, để một luồng cũ không khóa mất
 camera.
+
+#### 5.5.1. Thay Module: IMX219 → IMX708
+
+Camera Module 2 ngừng được nhận diện — mọi lần probe I2C đều trả về `read id: 0x0` kèm NACK, trên cả
+hai cổng CSI và mọi địa chỉ cảm biến, trong khi cả hai CSI PHY và cả hai sensor component đều bind
+bình thường và không hề có thay đổi nào về package, kernel hay device tree kể từ lần khởi động còn
+chạy được. NACK chứng minh controller đã phát đúng địa chỉ ra bus mà không có ai trả lời, nên lỗi
+nằm ở phần điện chứ không phải phần mềm. Cắm một Module 3 vào đúng cổng đó với đúng phần mềm đó thì
+probe thành công ngay (`sensor_id:0x708`), khoanh vùng lỗi vào **module IMX219 hoặc sợi cáp ribbon
+của nó**. Vẫn chưa kiểm tra riêng từng cái.
+
+Module 3 dùng thay được nhưng **không** phải cảm biến phù hợp hơn cho ứng dụng này:
+
+| | Module 2 (IMX219) | Module 3 (IMX708) |
+|---|---|---|
+| FOV ngang | 62.2° | 66° |
+| Khẩu độ / tiêu cự | f/2.0, 3.04mm | f/1.8, 4.74mm |
+| Hyperfocal | ~1.5m → nét từ **~0.8m** tới ∞ | ~2.6m → nét từ **~1.3m** tới ∞ |
+| Lấy nét | cố định theo thiết kế | VCM, **không có driver actuator nào bind** |
+
+**Autofocus của Module 3 không hoạt động và không thể làm cho nó hoạt động.** Tài liệu của
+Thundercomm nói thẳng rằng *"phiên bản phần mềm hiện tại không hỗ trợ chức năng autofocus (AF) của
+camera Module 3"*, và `dmesg` xác nhận điều đó ở mức phần cứng — không có `CAM-ACTUATOR` nào được
+probe, tức motor voice-coil không có driver. `qtiqmmfsrc` nhận thuộc tính `focus-mode` mà không báo
+lỗi rồi không làm gì cả, và đó mới là phần nguy hiểm: nó hỏng một cách im lặng.
+
+Vì vậy ống kính nằm ở đúng vị trí mà lò xo giữ nó khi không có điện, một vị trí không chọn được và
+cũng không đảm bảo giống nhau giữa các đơn vị. Trên chiếc được thử, vị trí đó rơi vào khoảng khá xa
+và dùng được — khuôn mặt ở ~0.5–0.8m chấm được 179 điểm độ nét so với 180–311 của bức tường cách 2–3m
+phía sau, tức gần và xa nét tương đương nhau, không thấy mặt phẳng lấy nét nào rõ rệt. Đó đúng là kiểu
+ảnh có chiều sâu trường ảnh lớn mà ứng dụng này cần, nhưng là do may chứ không do cấu hình, còn Module
+2 cho ra kiểu ảnh đó theo thiết kế và với giới hạn gần tốt hơn. Khôi phục Module 2 vẫn là lựa chọn
+tốt hơn, sau khi có cáp ribbon thay thế để xác định hỏng là do module hay do cáp.
+
+**Hướng ảnh.** Module 3 với cách gá hiện tại cho ra khung hình xoay 180°. Việc này chưa được sửa
+trong đường chụp ảnh, nên hiện VLM đang nhận một cảnh bị lộn ngược.
 
 ### 5.6. Chế Độ Chạy
 
@@ -1208,3 +1307,15 @@ thời gian encode ảnh ổn định ở mức cao hơn ~2s do SoC bị throttl
 | llama-cpp native recompile | Không hiệu quả | LLAMAFILE=1 runtime dispatch đã tối ưu |
 
 Không còn đòn bẩy phần mềm đáng kể ở cấu hình hiện tại.
+
+**Camera.** Module 2 không còn probe được và đang dùng Module 3 thay thế (5.5.1). Hai hệ quả còn tồn
+tại trong bản build hiện tại:
+
+| Giới hạn | Ảnh hưởng |
+|----------|-----------|
+| IMX708 không có driver autofocus | Lấy nét cố định ở vị trí nghỉ của ống kính khi không cấp điện — dùng được trên chiếc đã thử, nhưng không chọn được và không đảm bảo giống nhau giữa các đơn vị |
+| Giới hạn gần ~1.3m so với ~0.8m của Module 2 | Vật trong tầm tay được phân giải kém hơn so với Module 2 |
+| Khung hình xoay 180° | Chưa sửa trong đường chụp ảnh; hiện VLM nhận cảnh bị lộn ngược |
+
+Hai giới hạn đầu sẽ hết khi khôi phục Module 2, sau khi có cáp ribbon thay thế để xác định hỏng là do
+module hay do cáp.

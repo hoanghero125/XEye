@@ -21,7 +21,11 @@ SERVER = "http://localhost:8000"
 # prod — write nothing to disk; the answer only goes to the speaker.
 # Change the default here, export XEYE_MODE=prod, or pass --mode prod for one run.
 MODE = os.getenv("XEYE_MODE", "dev")
-DEV_OUTPUT = "data/audio/output.wav"
+# dev keeps every artefact of a run so it can be checked afterwards: what the camera saw, what
+# the microphone heard, and what was spoken back. prod writes none of them.
+DEV_OUTPUT   = "data/audio/output.wav"
+DEV_IMAGE    = "data/images/capture.jpg"
+DEV_QUESTION = "data/audio/question.wav"
 
 CAMERA = 0    # CSI connector: 0 = Camera connector 1, 1 = Camera connector 2
 EXPOSURE = 2  # exposure-compensation (-12..12); +2 lifts indoor scenes without blowing highlights
@@ -46,20 +50,33 @@ MAX_RECORD     = 12.0   # hard cap on one question
 SPEECH_TIMEOUT = 6.0    # give up if nobody speaks at all
 
 # ── Button ───────────────────────────────────────────────────────────────────
-# Momentary switch across physical pins 13 (GPIO_24) and 14 (GND) on the 40-pin header, read
+# Momentary switch across physical pins 16 (GPIO_23) and 14 (GND) on the 40-pin header, read
 # active-low with the internal pull-up. Press means "start listening" — VAD decides when the
 # question ended, so the button is never held.
 #
-# libgpiod addresses lines as chip + offset, which is neither the physical pin number (13) nor
-# the sysfs number the vendor docs use (559). It is assigned by the kernel at boot, so it has
-# to come from the board:
+# libgpiod addresses lines as chip + offset, neither of which is the physical pin number (16).
+# The SoC pinctrl is /dev/gpiochip4 (f100000.pinctrl, 176 lines) — NOT gpiochip0, which is a
+# PMIC with 12 — and GPIO_23 is offset 23 there. `gpiofind` does not help: the gpiod CLI tools
+# are not installed, and no chip exposes line names anyway (the device tree sets no
+# gpio-line-names). Ignore the sysfs numbers in the vendor docs; they assume a TLMM base of 535
+# where this kernel uses 547, which is why chip + offset is the stable way to address a line.
 #
-#     gpiofind GPIO_24        # prints "<chip> <offset>" if the device tree names its lines
-#     gpioinfo                # otherwise, find it in the listing
+# **Pin 16, not the pin 13 (GPIO_24) the wiring notes originally called for.** Two faults ruled
+# 13 out. Its device-tree bias is `pull down`, so a released button reads low and a press — which
+# also pulls low — produces no edge to detect at all; and `libgpiod`'s PULL_UP request is
+# silently ignored by this pinctrl driver (verified across five lines), so the code could not
+# correct it. Forcing pull-up by writing the TLMM register directly did take effect, and three
+# unconnected control lines duly rose to high — but GPIO_24 stayed low, so something ties it to
+# ground and beats the pull-up.
 #
-# then export XEYE_BUTTON_LINE (and XEYE_BUTTON_CHIP if it is not gpiochip0).
-BUTTON_CHIP     = os.getenv("XEYE_BUTTON_CHIP", "/dev/gpiochip0")
-BUTTON_LINE     = os.getenv("XEYE_BUTTON_LINE")   # unset until confirmed on the board
+# GPIO_23 avoids both: the device tree already gives it `pull up`, so it reads high at rest with
+# no register poking and the setting survives a reboot. Pins 14 and 16 are adjacent in the same
+# header row, so only the signal wire moves; ground stays put.
+#
+#     gpio23 : in  high func0 2mA pull up      <- this pin
+#     gpio24 : in  low  func0 2mA pull down    <- the one abandoned
+BUTTON_CHIP     = os.getenv("XEYE_BUTTON_CHIP", "/dev/gpiochip4")
+BUTTON_LINE     = os.getenv("XEYE_BUTTON_LINE", "26")   # GPIO_26 = physical pin 16
 BUTTON_DEBOUNCE = 50    # ms
 
 
@@ -295,7 +312,7 @@ def speak(text: str, voice: str, output_path: str | None, playback: bool = True)
 
 
 class RollingCamera:
-    """Stream the CSI camera (IMX219 / Camera Module 2) and hand out the newest frame.
+    """Stream the CSI camera and hand out the sharpest recent frame.
 
     The old one-shot capture ran a ~2s warmup burst hidden inside the fixed 5s mic window.
     With VAD a short question can end before that, which would put the camera back on the
@@ -303,10 +320,18 @@ class RollingCamera:
     end. It is also the more correct frame: contemporaneous with the question rather than
     with the start of listening.
 
-    `multifilesink max-files=5` is a ring buffer, and it lands in tmpfs where available so a
+    `multifilesink max-files` is a ring buffer, and it lands in tmpfs where available so a
     long question does not push megabytes of JPEG through the board's flash.
+
+    Of those buffered frames the sharpest is chosen, not the newest. Motion blur scales with
+    the camera's instantaneous angular velocity, which rises and falls through a walking
+    gait, so a window spanning part of a step usually contains a stiller moment than its last
+    frame. Exposure is deliberately left on auto: shortening the shutter would cut blur too,
+    but pinning shutter and gain costs ~7.6 stops of adaptation between indoors and sunlight,
+    and a blown frame is a total loss where a soft one still describes.
     """
-    WARMUP = 2.0   # auto-exposure needs ~5 frames to converge
+    WARMUP  = 2.0   # auto-exposure needs ~5 frames to converge
+    BUFFER  = 10    # ~333ms at 30fps: wide enough to span part of a gait cycle, still current
 
     def __init__(self):
         shm = Path("/dev/shm")
@@ -321,11 +346,29 @@ class RollingCamera:
              f"exposure-compensation={EXPOSURE}", "!",
              "video/x-raw,format=NV12,width=1280,height=720,framerate=30/1", "!",
              "queue", "!", "jpegenc", "!", "queue", "!",
-             "multifilesink", f"location={self._dir.name}/f_%04d.jpg", "max-files=5"],
+             "multifilesink", f"location={self._dir.name}/f_%04d.jpg",
+             f"max-files={self.BUFFER}"],
             stdout=subprocess.DEVNULL, stderr=self._err)
 
+    @staticmethod
+    def _sharpness(path: Path) -> float:
+        """Variance of the Laplacian — higher is sharper. 0 if the frame cannot be read.
+
+        Ranked on a 1/4-scale draft decode: blur is a low-frequency property that survives
+        downscaling, and it keeps the whole buffer under ~100ms to score.
+        """
+        try:
+            from PIL import Image
+            im = Image.open(path)
+            im.draft("L", (320, 180))
+            g = np.asarray(im.convert("L"), dtype=np.float32)
+            lap = (g[:-2, 1:-1] + g[2:, 1:-1] + g[1:-1, :-2] + g[1:-1, 2:] - 4 * g[1:-1, 1:-1])
+            return float(lap.var())
+        except Exception:
+            return 0.0   # unreadable frame (torn write) must never win
+
     def grab(self, path: str):
-        """Copy the newest settled frame to `path`."""
+        """Copy the sharpest settled frame to `path`."""
         wait = self.WARMUP - (time.time() - self._t0)
         if wait > 0:
             time.sleep(wait)   # question ended before auto-exposure had converged
@@ -334,8 +377,17 @@ class RollingCamera:
             raise RuntimeError(
                 "Camera capture failed — no frame written. Check that the CSI camera is "
                 "detected (`dmesg | grep 'Probe success'`).\n" + self._stderr_tail())
-        shutil.copy(frames[-1], path)
-        print(f"[camera] Frame saved → {path}")
+
+        t0 = time.time()
+        scored = [(self._sharpness(f), f) for f in frames]
+        best_score, best = max(scored, key=lambda sf: sf[0])
+        if best_score == 0.0:          # every frame unreadable — fall back to the newest
+            best = frames[-1]
+        shutil.copy(best, path)
+        newest = scored[-1][0]
+        gain = f", {best_score/newest:.2f}x sharper than newest" if newest > 0 else ""
+        print(f"[camera] Frame saved → {path}  "
+              f"(best of {len(frames)} in {(time.time()-t0)*1000:.0f}ms{gain})")
 
     def close(self):
         if self._proc.poll() is None:
@@ -362,20 +414,28 @@ def run(audio_path: str | None, image_path: str | None, output_path: str | None 
     # question rather than before it, and the frame taken is the one from the moment the user
     # stopped speaking — so the camera never lands on the critical path, however short the
     # question turns out to be.
+    # dev keeps the frame and the question; prod uses temp files and deletes them.
+    keep = output_path is not None
+
+    def _scratch(dev_path: str, suffix: str):
+        """Where an intermediate artefact goes. Returns (path, tempfile-or-None)."""
+        if keep:
+            Path(dev_path).parent.mkdir(parents=True, exist_ok=True)
+            return dev_path, None
+        tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+        tmp.close()
+        return tmp.name, tmp
+
     _tmp = _tmp_wav = None
     cam = None
     if image_path is None:
-        _tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-        _tmp.close()
-        image_path = _tmp.name
+        image_path, _tmp = _scratch(DEV_IMAGE, ".jpg")
         cam = RollingCamera()
 
     try:
         if audio_path is None:
-            _tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            _tmp_wav.close()
-            record_question(_tmp_wav.name, silence, max_record, cues=playback)
-            audio_path = _tmp_wav.name
+            audio_path, _tmp_wav = _scratch(DEV_QUESTION, ".wav")
+            record_question(audio_path, silence, max_record, cues=playback)
 
         if cam is not None:
             cam.grab(image_path)
@@ -417,11 +477,30 @@ def run(audio_path: str | None, image_path: str | None, output_path: str | None 
     if playback:
         print(f"\n[pipeline] Time to first sound: {(t0 - t_total) + first_audio:.2f}s")
     print(f"[pipeline] Total: {time.time()-t_total:.2f}s")
+    if keep:
+        print(f"[pipeline] Kept: {image_path}, {audio_path}, {output_path}")
 
     if _tmp:
         Path(_tmp.name).unlink(missing_ok=True)
     if _tmp_wav:
         Path(_tmp_wav.name).unlink(missing_ok=True)
+
+
+def check_button_access():
+    """Fail early, and with the fix, if the GPIO character device is not usable.
+
+    GPIO chips are root-only on this board and there is no gpio group, so an unprepared board
+    would otherwise fail with a bare PermissionError on the first press.
+    """
+    if not os.access(BUTTON_CHIP, os.R_OK | os.W_OK):
+        raise RuntimeError(
+            f"No access to {BUTTON_CHIP}.\n"
+            "GPIO chips are root-only here and the board has no gpio group. Grant access once:\n"
+            "    sudo groupadd -f gpio && sudo usermod -aG gpio $USER\n"
+            "    echo 'SUBSYSTEM==\"gpio\", KERNEL==\"gpiochip*\", GROUP=\"gpio\", MODE=\"0660\"' \\\n"
+            "      | sudo tee /etc/udev/rules.d/60-gpio.rules\n"
+            "    sudo udevadm control --reload-rules && sudo udevadm trigger\n"
+            "then log out and back in.")
 
 
 def wait_for_button():
@@ -433,12 +512,7 @@ def wait_for_button():
     import gpiod
     from datetime import timedelta
 
-    if BUTTON_LINE is None:
-        raise RuntimeError(
-            "Button line not configured. Physical pin 13 is GPIO_24 (sysfs 559) on this board;\n"
-            "find its libgpiod offset with `gpiofind GPIO_24` (or `gpioinfo`), then:\n"
-            "    export XEYE_BUTTON_LINE=<offset>\n"
-            "    export XEYE_BUTTON_CHIP=/dev/gpiochipN   # only if not gpiochip0")
+    check_button_access()
     line_offset = int(BUTTON_LINE)
 
     if hasattr(gpiod, "request_lines"):                      # libgpiod v2
@@ -449,6 +523,15 @@ def wait_for_button():
             debounce_period=timedelta(milliseconds=BUTTON_DEBOUNCE))
         with gpiod.request_lines(BUTTON_CHIP, consumer="xeye",
                                  config={line_offset: settings}) as request:
+            # A falling edge cannot arrive on a line that is already low, so a button held
+            # down — or one whose contacts have stuck closed — would otherwise wait forever
+            # with no indication of why. Say so, and arm once it releases.
+            if request.get_value(line_offset) == gpiod.line.Value.INACTIVE:
+                print(f"[button] Line {line_offset} is already low — button held down or stuck "
+                      f"closed. Waiting for it to release ...", flush=True)
+                while request.get_value(line_offset) == gpiod.line.Value.INACTIVE:
+                    time.sleep(0.05)
+                print("[button] Released.", flush=True)
             request.wait_edge_events()
             request.read_edge_events()
     else:                                                    # libgpiod v1
@@ -473,13 +556,14 @@ def serve(output_path: str | None, voice: str, silence: float, max_record: float
     A failed query must not take the device down with it — a missed press, a camera hiccup or
     a server restart should leave it waiting for the next press.
     """
-    print(f"[button] {BUTTON_CHIP} line {BUTTON_LINE} (pin 13 / GPIO_24) — press to ask, "
+    check_button_access()   # a misconfigured board should say so now, not on the first press
+    print(f"[button] {BUTTON_CHIP} line {BUTTON_LINE} (pin 16 / GPIO_26) — press to ask, "
           f"Ctrl-C to stop\n")
     if playback:
         beep("ready")       # the only signal that the device finished booting
     while True:
-        wait_for_button()
         try:
+            wait_for_button()   # inside the guard: a GPIO hiccup must not end the service
             run(None, None, output_path, voice, silence, max_record, playback)
         except KeyboardInterrupt:
             raise
@@ -487,6 +571,7 @@ def serve(output_path: str | None, voice: str, silence: float, max_record: float
             print(f"[error] {exc}")
             if playback:
                 beep("error")
+            time.sleep(1)   # a persistently failing button must not spin the CPU
         print("\n[button] Ready.\n")
 
 

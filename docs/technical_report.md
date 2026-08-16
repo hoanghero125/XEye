@@ -1,6 +1,6 @@
 # Technical Report: XEye
 
-**Last updated:** 07/08/2026 
+**Last updated:** 15/08/2026 
 **Author:** Do Pham Bao Hoang
 
 All performance figures in this report were measured on the running server on 23-24/07/2026 (RUBIK Pi 3, warm — the first request after startup is slower).
@@ -47,6 +47,7 @@ All performance figures in this report were measured on the running server on 23
   - [5.3. End-to-End Latency](#53-end-to-end-latency)
   - [5.4. Thermal Behaviour](#54-thermal-behaviour)
   - [5.5. Camera Capture](#55-camera-capture)
+    - [5.5.1. Module Substitution: IMX219 → IMX708](#551-module-substitution-imx219--imx708)
   - [5.6. Runtime Modes](#56-runtime-modes)
 - [6. Summary](#6-summary)
   - [6.1. Selected Models](#61-selected-models)
@@ -66,7 +67,7 @@ All performance figures in this report were measured on the running server on 23
 | CPU | 4× Cortex-A55 @1.96GHz + 3× Cortex-A78 @2.40GHz + 1× Cortex-X1 @2.71GHz |
 | GPU | Adreno 643 |
 | NPU | Hexagon 780 (V73), 12 TOPS |
-| Camera | Raspberry Pi Camera Module 2 (IMX219) on CSI connector 1, captured via GStreamer `qtiqmmfsrc` at 1280×720 NV12. Board requires a 22-pin 0.5mm FPC; standard variant only (no NoIR/wide-angle) |
+| Camera | Raspberry Pi Camera Module 3 (IMX708) on CSI connector 1, captured via GStreamer `qtiqmmfsrc` at 1280×720 NV12. Substituted after the Module 2 failed to probe (5.5.1); autofocus is unsupported on this board. Requires a 22-pin 0.5mm FPC; standard variant only (no NoIR/wide-angle) |
 | Audio | Seeed Studio ReSpeaker Lite (USB) — mic array in, speaker out |
 | Button | PBS-33B 12mm momentary, 2P, no LED, waterproof — pins 13/14 of the 40-pin header, see 1.4 |
 | Power | 3S2P Li-ion pack, ~55.5 Wh, through a DC-DC module with USB-C PD output — see 1.3 |
@@ -133,7 +134,8 @@ which the device's own user cannot do.
 |-----------|-------|
 | Switch | PBS-33B, 12mm panel mount, momentary, 2P, no LED, waterproof |
 | Rating | 1A/250V (mains-oriented; the actual load is microamps at 3.3V) |
-| Connection | Physical pin 13 (GPIO_24, sysfs 559) and pin 14 (GND), 40-pin LS header |
+| Connection | Physical pin 13 (GPIO_24) and pin 14 (GND), 40-pin LS header |
+| Line address | `/dev/gpiochip4` (`f100000.pinctrl`) offset 24 |
 | Logic | Active-low, internal pull-up, no external resistor |
 | Debounce | 50ms, in the kernel via libgpiod where available |
 | Filter | 100nF across the switch terminals |
@@ -156,11 +158,35 @@ physically side by side and a 2-pin connector seats directly with no crossed wir
 **Three numbering schemes describe the same pin, and none of them interchange.** Pin 13 is the
 physical position, `GPIO_24` is the board's signal name, and `559` is the global number the
 vendor documentation uses for the deprecated `/sys/class/gpio` interface. libgpiod wants none of
-these — it addresses a line as chip plus offset, assigned by the kernel at boot. That offset is
-resolved on the board with `gpiofind GPIO_24`, or from `gpioinfo` where the device tree does not
-name its lines, and supplied through `XEYE_BUTTON_LINE`. `pipeline.py` refuses to start in
-button mode until it is set rather than defaulting to a guess and waiting silently on the wrong
-line.
+these — it addresses a line as chip plus offset.
+
+Both were resolved on the board from the kernel's own pin table, which names the TLMM pins
+directly:
+
+```
+$ sudo cat /sys/kernel/debug/pinctrl/f100000.pinctrl/pinmux-pins
+pin 24 (GPIO_24): (MUX UNCLAIMED) (GPIO UNCLAIMED)
+```
+
+So `GPIO_24` is **offset 24** on `/dev/gpiochip4` — `f100000.pinctrl`, the SoC TLMM, 176 lines.
+It is emphatically not `gpiochip0`, which is a PMIC (`c440000.spmi:pmic@8`) with 12 lines and no
+relationship to the 40-pin header.
+
+**The vendor's sysfs number is misleading on this kernel.** 559 assumes a TLMM base of 535;
+this kernel bases the same chip at 547, which puts GPIO_24 at 571. Deriving the offset by
+subtracting the running base from the documented sysfs number therefore yields 12 — the wrong
+line, and one that is also free and so fails silently rather than loudly. Chip plus offset is
+stable across kernels where the global sysfs number is not; the pin table above is the
+authority, not arithmetic on 559.
+
+**`gpiofind` is not usable here.** The gpiod CLI tools are not installed, and no chip exposes
+line names in any case — the device tree sets no `gpio-line-names`, so all six chips report zero
+named lines. The pinctrl table is a separate mapping that `gpiofind` does not consult.
+
+**GPIO access requires configuration.** `/dev/gpiochip*` is `crw------- root root` and the board
+has no `gpio` group, so button mode fails with `Permission denied` on an unprepared board. A
+udev rule plus group membership grants it without running the pipeline as root; `pipeline.py`
+checks for access at startup and prints that fix rather than failing on the first press.
 
 **The 100nF filter earns its place twice.** Against the ~50 kΩ pull-up it forms a ~5ms RC,
 which both debounces in hardware and stops a long lead to a strap-mounted switch from
@@ -1130,7 +1156,7 @@ shape how this is done.
 
 **Auto-exposure needs time to settle.** The first frames of any stream are dark — roughly 5 frames
 pass before AE converges. The stream therefore stays open for the whole question, writing into a
-5-frame ring buffer, and the *newest* frame is taken once the speaker stops. Taking the first frame
+10-frame ring buffer, and a frame is taken once the speaker stops. Taking the first frame
 instead would sample the sensor mid-convergence.
 
 This replaced a one-shot ~2s warmup burst, which was safe only while recording used a fixed 5s
@@ -1143,23 +1169,95 @@ only remaining wait is when a question ends sooner than AE converges, which is f
 The ring buffer is written to tmpfs where available. At 30fps a long question is several MB of
 JPEG, which does not belong on the board's flash — see 5.6 for why that matters.
 
-**Default exposure is too dark indoors.** `exposure-compensation` accepts −12..12; measured on this
-board against a dim indoor scene:
+**The sharpest buffered frame is chosen, not the newest.** Motion blur scales with the camera's
+instantaneous angular velocity, which rises and falls through a walking gait, so a window spanning
+part of a step usually holds a stiller moment than its final frame. Each frame is scored by
+variance of the Laplacian on a ¼-scale draft decode — blur is a low-frequency property that
+survives downscaling, so scoring at 320×180 is equally valid and roughly ten times faster.
 
-| exposure-compensation | Result |
-|-----------------------|--------|
-| 0 | mean brightness 122 |
-| **+2** | **mean brightness 138 — no clipping** |
-| +4 | 22% of pixels blown out |
-| +6 | 29% of pixels blown out |
+| Measurement | Result |
+|-------------|--------|
+| Discrimination (sharp vs Gaussian-blurred copy) | 1263 vs 160 — **7.9×** |
+| Cost to score 10 frames | **43ms** (against a ~18s VLM call) |
+| Static camera (nothing to gain) | picks a frame 1.00× the newest — a clean no-op |
+| Synthetic burst, sharp frame buried at position 7 | selected it, **17.69×** sharper than newest |
 
-→ **`EXPOSURE = 2`.** It recovers shadow detail without clipping highlights; +4 and above only
-trade one failure for the other.
+Buffer depth is 10 frames, ~333ms at 30fps: wide enough to span part of a gait cycle while the
+frame stays contemporaneous with the question. Unreadable frames score 0 and can never win, and if
+every frame fails to decode the newest is used — a torn write must not be able to fail a query.
+
+**Exposure.** `exposure-compensation` accepts −12..12. The IMX708 tolerates it far better than the
+IMX219 did; measured on the same indoor scene:
+
+| exposure-compensation | Brightness | Contrast | Blown out |
+|-----------------------|-----------|----------|-----------|
+| +2 | 126.9 | 44.1 | 4.2% |
+| **+4** | **133.7** | **44.7** | 5.8% |
+| +6 | — | 31 | — |
+
+→ **`EXPOSURE = 2`.** The figures for the IMX219 were much harsher (+4 blew out 22% of pixels), so
+this setting is sensor-specific and had to be re-measured when the module changed. On the IMX708
+there is headroom above 2: contrast holds to +4 and only flattens between +4 and +6.
+
+**Exposure stays on auto — the shutter is not pinned.** Shortening it would cut motion blur:
+10ms with ISO 1600 measured identical brightness (132.2 vs 129.9) and identical noise (0.76 vs
+0.77) at a 3.3× shorter shutter, and the noise trade is unusually favourable here because
+downscaling to 448×448 averages noise away but cannot undo blur. It was rejected anyway. Pinning
+shutter and gain costs the ~7.6 stops of adaptation between a 400-lux room and 80,000-lux
+sunlight; outdoors the frame would be pure white with no mechanism to recover. A blurred frame
+still describes, a blown one does not — and for a mobility aid, outdoors is not an edge case.
+
+**Resolution and aspect ratio are not levers.** The model sees one fixed 448×448 tile regardless
+of input (4.2.10), encode time is flat against input size, and server-side preprocessing is 10ms.
+1280×720 sits above 448 in both axes so nothing is upscaled, and downscaling from it supplies free
+antialiasing. Requesting 4:3 (1280×960) does not add view — it **crops ~33% of the horizontal
+field**, measured by comparing a landmark's pixel width across both modes. A wearable should not
+trade peripheral awareness for a marginally smaller aspect squeeze.
+
+> **Mode support is narrow and fails hard.** 960×720 and 1920×1080 both **crash `cam-server`**
+> outright rather than erroring; systemd restarts it in ~2s, but the capture is lost and Ubuntu
+> raises a crash report. Stay on 1280×720.
 
 **One consumer only.** The camera admits a single reader, so a capture and
 `scripts/camera_preview.py` cannot run at the same time. The preview server tracks the live
 `gst-launch-1.0` process and terminates it when a new viewer connects, so a stale stream cannot
 lock the camera out.
+
+#### 5.5.1. Module Substitution: IMX219 → IMX708
+
+The Camera Module 2 stopped being detected — every I2C probe returned `read id: 0x0` with a NACK,
+on both CSI connectors and every sensor address, while both CSI PHYs and both sensor components
+bound normally and no package, kernel or device-tree change had occurred since the last working
+boot. A NACK proves the controller clocked out an address correctly and nothing acknowledged, so
+the fault is electrical, not software. Substituting a Module 3 on the same connector and software
+probed immediately (`sensor_id:0x708`), isolating the fault to the **IMX219 module or its ribbon
+cable**. Both remain untested individually.
+
+The Module 3 is a working substitute but is **not** the better sensor for this application:
+
+| | Module 2 (IMX219) | Module 3 (IMX708) |
+|---|---|---|
+| Horizontal FOV | 62.2° | 66° |
+| Aperture / focal length | f/2.0, 3.04mm | f/1.8, 4.74mm |
+| Hyperfocal | ~1.5m → sharp from **~0.8m** to ∞ | ~2.6m → sharp from **~1.3m** to ∞ |
+| Focus | fixed by design | VCM, **no actuator driver bound** |
+
+**The Module 3's autofocus does not work and cannot be made to.** Thundercomm's documentation
+states plainly that *"the current software version does not support the autofocus (AF) function of
+the Module 3 camera"*, and `dmesg` confirms it at the hardware level — no `CAM-ACTUATOR` is ever
+probed, so the voice-coil motor has no driver. `qtiqmmfsrc` accepts `focus-mode` without error and
+does nothing with it, which is the dangerous part: it fails silently.
+
+The lens therefore rests wherever its spring parks it unpowered, a position that is neither
+selectable nor guaranteed between units. On the unit tested it lands usefully far — a face at
+~0.5–0.8m scored 179 for sharpness against 180–311 for a wall 2–3m behind, i.e. near and far
+comparably sharp with no visible focal plane. That is the deep-depth-of-field rendering this
+application wants, but it is luck rather than configuration, and the Module 2 delivers it by
+design with a nearer limit. Restoring the Module 2 remains preferable once a replacement ribbon
+cable identifies whether the module or the cable failed.
+
+**Orientation.** The Module 3 as currently mounted delivers frames rotated 180°. This is not yet
+corrected in the capture path, so the VLM currently receives an inverted scene.
 
 ### 5.6. Runtime Modes
 
@@ -1207,3 +1305,15 @@ image encode settles ~2s higher as the SoC throttles (5.4).
 | llama-cpp native recompile | Ineffective | LLAMAFILE=1 runtime dispatch already optimized |
 
 No significant software leverage remaining at current configuration.
+
+**Camera.** The Module 2 no longer probes and a Module 3 is substituted (5.5.1). Two consequences
+carry into the current build:
+
+| Limitation | Effect |
+|------------|--------|
+| No autofocus driver on the IMX708 | Focus is fixed at the lens's unpowered rest position — usable on the unit tested, but neither selectable nor guaranteed across units |
+| Near limit ~1.3m vs the Module 2's ~0.8m | Objects within arm's reach are less well resolved than the Module 2 would render them |
+| Frames arrive rotated 180° | Not yet corrected in the capture path; the VLM currently receives an inverted scene |
+
+The first two resolve by restoring a Module 2 once a replacement ribbon cable establishes whether
+the module or the cable failed.
