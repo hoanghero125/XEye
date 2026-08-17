@@ -1,6 +1,6 @@
 # Báo Cáo Kỹ Thuật: XEye
 
-**Cập nhật lần cuối:** 15/08/2026  
+**Cập nhật lần cuối:** 17/08/2026  
 **Tác giả:** Đỗ Phạm Bảo Hoàng
 
 Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên server đang chạy ngày 23-24/07/2026 (RUBIK Pi 3, trạng thái warm — request đầu tiên sau khi khởi động server luôn chậm hơn).
@@ -67,9 +67,9 @@ Toàn bộ số liệu hiệu năng trong báo cáo này được đo trên serv
 | CPU | 4× Cortex-A55 @1.96GHz + 3× Cortex-A78 @2.40GHz + 1× Cortex-X1 @2.71GHz |
 | GPU | Adreno 643 |
 | NPU | Hexagon 780 (V73), 12 TOPS |
-| Camera | Raspberry Pi Camera Module 3 (IMX708) trên CSI connector 1, chụp qua GStreamer `qtiqmmfsrc` ở 1280×720 NV12. Thay thế sau khi Module 2 không còn probe được (5.5.1); board không hỗ trợ autofocus. Yêu cầu FPC 22-pin 0.5mm; chỉ hỗ trợ bản standard (không hỗ trợ NoIR/wide-angle) |
+| Camera | Raspberry Pi Camera Module 3 (IMX708) trên CSI connector 2, chụp qua GStreamer `qtiqmmfsrc` ở 1280×720 NV12, xoay 180° khi chụp. Thay thế sau khi Module 2 không còn probe được (5.5.1); board không hỗ trợ autofocus. Yêu cầu FPC 22-pin 0.5mm; chỉ hỗ trợ bản standard (không hỗ trợ NoIR/wide-angle) |
 | Audio | Seeed Studio ReSpeaker Lite (USB) — mic array vào, speaker ra |
-| Nút nhấn | PBS-33B 12mm loại nhấn nhả, 2P, không đèn, chống nước — chân 13/14 của header 40 pin, xem 1.4 |
+| Nút nhấn | Module 3 chân có sẵn pull-up — tín hiệu ở chân 16 (`GPIO_26`), active-low, xem 1.4 |
 | Nguồn | Pack Li-ion 3S2P, ~55.5 Wh, qua module DC-DC có ngõ ra USB-C PD — xem 1.3 |
 | OS | Ubuntu (Linux 6.8.0-1071-qcom) |
 
@@ -133,66 +133,59 @@ Một cú nhấn bắt đầu một lượt hỏi. Trước đó, cách kích ho
 
 | Thuộc tính | Giá trị |
 |------------|---------|
-| Loại công tắc | PBS-33B, gắn panel 12mm, nhấn nhả, 2P, không đèn, chống nước |
-| Thông số | 1A/250V (dành cho điện lưới; tải thực tế chỉ vài microampe ở 3.3V) |
-| Kết nối | Chân vật lý 13 (GPIO_24) và chân 14 (GND), header LS 40 pin |
-| Địa chỉ line | `/dev/gpiochip4` (`f100000.pinctrl`) offset 24 |
-| Mức logic | Active-low, dùng pull-up nội, không cần điện trở ngoài |
-| Debounce | 50ms, thực hiện trong kernel qua libgpiod nếu có |
-| Lọc nhiễu | Tụ 100nF mắc song song hai chân công tắc |
+| Loại nút | Module nút nhấn 3 chân, có sẵn điện trở pull-up trên board |
+| Kết nối | Chân tín hiệu vào chân vật lý 16 (`GPIO_26`), kèm VCC và GND của module |
+| Địa chỉ line | `/dev/gpiochip4` (`f100000.pinctrl`) offset 26 |
+| Mức logic | Active-low — line nghỉ ở 3.3V, khi nhấn bị kéo xuống 0V |
+| Cạnh | Cạnh xuống, `gpiod.line.Edge.FALLING` với `Bias.PULL_UP` |
+| Debounce | 50ms, thực hiện trong kernel qua libgpiod |
 
 **Chọn loại nhấn nhả chứ không phải loại giữ trạng thái, vì VAD đã lo đầu còn lại.** Cú nhấn chỉ có
 nghĩa "bắt đầu nghe"; phần 2.2 quyết định khi nào câu hỏi kết thúc. Không bao giờ phải giữ nút, điều
 này cũng phù hợp với người dùng không nhìn thấy để biết cần giữ bao lâu.
 
-**Không dùng pull-up ngoài.** Header chạy ở mức 3.3V — mức 1.8V thường gặp trên các chip Qualcomm
-không áp dụng ở đây — nhưng datasheet giới hạn điện trở pull-up và pull-down ngoài **không được nhỏ
-hơn 50 kΩ**, do hạn chế của IC level shifter trên board. Mức 10 kΩ mà mọi hướng dẫn Raspberry Pi đưa
-ra vi phạm giới hạn này gấp 5 lần. Dùng pull-up nội của SoC thì không phải bận tâm tới chuyện đó nữa.
+**Công tắc 2 chân trần không hoạt động trên board này, và lý do đáng được ghi lại.** Nếu chỉ có công
+tắc nối giữa chân GPIO và đất, line chỉ được điều khiển trong lúc tiếp điểm đóng; khi tiếp điểm mở ra
+thì line bị thả nổi, và ngõ vào CMOS giữ nguyên điện tích cuối cùng. Do đó chân bị "kẹt" ở đúng mức mà
+công tắc vừa nối tới và không bao giờ trở về — một lần nhấn được ghi nhận, mọi lần nhấn sau đó vô hình
+vì line đã sẵn ở mức "đang nhấn". Đảo dây sang 3.3V cho ra đúng lỗi đó nhưng ngược chiều: line kẹt ở
+mức cao thay vì mức thấp. Chính điện trở trên module mới là thứ chủ động kéo line về mức nghỉ, tức là
+thứ tạo ra cạnh nhả.
 
-**Chọn chân.** 28 trong 40 chân có thể làm GPIO nhưng phần lớn đã mang một chức năng mặc định — 2×
-I2C (gồm chân 3 và 5), 1× UART (chân 8 và 10, `/dev/ttyHS3`), 1× SPI (chân 19, 21, 23, 24), 1× I2S
-và 1× PWM — chỉ còn lại 9 chân trống. Chân 13 là một trong số đó, và chân 14 là ground (đã kiểm chứng
-trực tiếp trên board chứ không suy ra từ sơ đồ Raspberry Pi), nên hai chân tạo thành một cặp
-GPIO/ground nằm sát cạnh nhau và đầu nối 2 chân cắm thẳng vào được mà không phải bắt chéo dây.
+Pull-up nội của SoC không thay thế được. Yêu cầu bias của `libgpiod` bị driver pinctrl này bỏ qua một
+cách im lặng — đã kiểm chứng trên năm line khác nhau, không line nào phản hồi với `PULL_UP` hay
+`PULL_DOWN`. Ghi thẳng vào thanh ghi cấu hình chân của TLMM thì có tác dụng, nhưng mất sau khi khởi
+động lại và không thay thế được một điện trở thật trong mạch.
 
-**Có ba hệ đánh số cùng mô tả một chân, và chúng không thay thế cho nhau được.** 13 là vị trí vật lý,
-`GPIO_24` là tên tín hiệu của board, còn `559` là số toàn cục mà tài liệu nhà sản xuất dùng cho giao
-diện `/sys/class/gpio` đã lỗi thời. libgpiod không dùng số nào trong đó — nó định danh một line bằng
-chip cộng offset.
+**Chọn chân.** Header 40 chân tương thích bố cục Raspberry Pi, và chân 16 là GPIO thuần không mang
+chức năng mặc định nào. Chân 14 (GND) nằm ngay cạnh nó trên cùng một hàng.
 
-Cả hai giá trị đã được tra trực tiếp trên board từ bảng chân của chính kernel, nơi các chân TLMM
-được đặt tên rõ ràng:
+**Nhãn trên header không phải số chân TLMM, và đây là cái bẫy tốn thời gian nhất.** Các tên `GPIO_n`
+trên header là tên tín hiệu của board; pinctrl của SoC lại đặt tên các chân của nó là `GPIO_0`–
+`GPIO_175`. Hai hệ này trùng định dạng nhưng không thay thế cho nhau — chân 3 trên header ghi là
+"GPIO_2 (I2C1_SDA)" trong khi chân TLMM số 2 lại do `1c08000.pcie` chiếm giữ. Một bảng pinout tóm tắt
+ghi chân 16 là `GPIO_23` đã khiến mọi phép đo nhắm vào một line hoàn toàn không liên quan.
 
-```
-$ sudo cat /sys/kernel/debug/pinctrl/f100000.pinctrl/pinmux-pins
-pin 24 (GPIO_24): (MUX UNCLAIMED) (GPIO UNCLAIMED)
-```
+Căn cứ đúng là sơ đồ pinout trong trang tài liệu 40-pin LS connector của nhà sản xuất, ghi rõ
+**chân 16 = GPIO_26**, tức offset 26 trên `/dev/gpiochip4`. Tuyệt đối không phải `gpiochip0`, vốn là
+một PMIC (`c440000.spmi:pmic@8`) chỉ có 12 line và không liên quan gì tới header.
 
-Vậy `GPIO_24` là **offset 24** trên `/dev/gpiochip4` — `f100000.pinctrl`, tức TLMM của SoC, 176 line.
-Tuyệt đối không phải `gpiochip0`, vốn là một PMIC (`c440000.spmi:pmic@8`) chỉ có 12 line và không liên
-quan gì tới header 40 chân.
-
-**Số sysfs của nhà sản xuất gây hiểu nhầm trên kernel này.** Con số 559 giả định TLMM có base 535;
-kernel này đặt base của cùng chip đó ở 547, khiến GPIO_24 nằm ở 571. Do đó, nếu lấy số sysfs trong tài
-liệu trừ đi base đang chạy để suy ra offset thì sẽ ra 12 — sai line, mà line đó cũng đang trống nên sẽ
-hỏng một cách im lặng chứ không báo lỗi. Chip cộng offset ổn định qua các kernel còn số sysfs toàn cục
-thì không; bảng chân ở trên mới là căn cứ, không phải phép trừ trên 559.
+**Số sysfs của nhà sản xuất gây hiểu nhầm trên kernel này.** Chúng giả định TLMM có base 535 trong khi
+kernel này dùng 547, nên tính toán dựa trên chúng sẽ ra một line sai — mà thường cũng đang trống nên
+hỏng im lặng chứ không báo lỗi. Chip cộng offset ổn định qua các kernel còn số sysfs toàn cục thì không.
 
 **`gpiofind` không dùng được ở đây.** Bộ công cụ dòng lệnh gpiod không được cài, và dù có cài thì cũng
 không chip nào expose tên line — device tree không đặt `gpio-line-names`, nên cả sáu chip đều báo 0
-line có tên. Bảng pinctrl ở trên là một ánh xạ riêng mà `gpiofind` không đọc tới.
+line có tên. Bảng pinctrl là một ánh xạ riêng mà `gpiofind` không đọc tới.
 
 **Truy cập GPIO cần cấu hình thêm.** `/dev/gpiochip*` có quyền `crw------- root root` và board không
 có group `gpio`, nên chế độ nút nhấn sẽ lỗi `Permission denied` trên một board chưa chuẩn bị. Một udev
 rule kèm quyền group cấp được quyền này mà không phải chạy cả pipeline dưới root; `pipeline.py` kiểm
-tra quyền truy cập ngay lúc khởi động và in ra cách khắc phục, thay vì hỏng ở lần nhấn đầu tiên.
+tra quyền truy cập ngay lúc khởi động và in ra cách khắc phục.
 
-**Tụ 100nF có ích ở hai mặt.** Kết hợp với pull-up ~50 kΩ, nó tạo thành mạch RC ~5ms, vừa debounce
-bằng phần cứng vừa ngăn một sợi dây dài chạy tới nút gắn trên quai đeo gây kích hoạt nhầm ở một ngõ
-vào trở kháng cao. Nó cũng tạo ra một xung phóng điện nhỏ qua tiếp điểm mỗi lần nhấn, điều này quan
-trọng vì tiếp điểm loại dùng cho điện lưới không mạ vàng, và đóng cắt ở mức microampe là điều kiện
-dry-circuit nơi màng oxit sẽ tích tụ dần.
+**Nút đang bị giữ thì được báo, không bị treo.** Cạnh xuống không thể xuất hiện trên một line vốn đã ở
+mức thấp, nên `wait_for_button()` đọc mức trước khi arm: nếu nút đang bị giữ hoặc kẹt đóng thì nó báo
+ra và chờ nhả, thay vì chặn im lặng vô hạn.
 
 **Nó cũng biến `pipeline.py` thành một vòng lặp.** `--button` chờ một cú nhấn, trả lời, rồi quay lại
 chờ, nên thiết bị không cần terminal nào sau khi khởi động. Một lượt hỏi thất bại sẽ được báo lỗi và
@@ -1257,8 +1250,22 @@ phía sau, tức gần và xa nét tương đương nhau, không thấy mặt ph
 2 cho ra kiểu ảnh đó theo thiết kế và với giới hạn gần tốt hơn. Khôi phục Module 2 vẫn là lựa chọn
 tốt hơn, sau khi có cáp ribbon thay thế để xác định hỏng là do module hay do cáp.
 
-**Hướng ảnh.** Module 3 với cách gá hiện tại cho ra khung hình xoay 180°. Việc này chưa được sửa
-trong đường chụp ảnh, nên hiện VLM đang nhận một cảnh bị lộn ngược.
+**Hướng ảnh.** Module 3 với cách gá hiện tại cho ra khung hình xoay 180°, nên đường chụp ảnh xoay
+khung hình đã chọn về đúng chiều trước khi gửi đi (`ROTATE = 180` trong `pipeline.py`, có thể ghi đè
+bằng `XEYE_CAMERA_ROTATE`). Hướng ảnh ảnh hưởng đo được tới chất lượng mô tả — với cùng một câu hỏi
+trên cùng một khung hình, VLM trả lời *"một chiếc máy móc"* khi ảnh bị lộn ngược, so với *"một chiếc
+laptop"* khi ảnh đúng chiều. Phép xoay chỉ áp lên một khung hình được chọn chứ không lên cả luồng
+video, nên tốn ~10ms mỗi truy vấn thay vì chạy trên từng khung hình được stream.
+
+**`CAMERA` là chỉ số camera, không phải số hiệu connector.** `qtiqmmfsrc` đánh số các camera *được
+phát hiện*, nên khi chỉ gắn một module thì chỉ số luôn là 0 bất kể cắm vào cổng CSI nào — hiện module
+nằm ở connector 2 mà vẫn là `camera=0`. Yêu cầu một chỉ số không có camera phía sau sẽ không báo lỗi;
+pipeline chỉ đơn giản là không preroll được. Dòng probe của kernel mới cho biết slot thật:
+
+```
+$ dmesg | grep "Probe success"
+Probe success,slot:1,slave_addr:0x34,sensor_id:0x708
+```
 
 ### 5.6. Chế Độ Chạy
 
@@ -1315,7 +1322,7 @@ tại trong bản build hiện tại:
 |----------|-----------|
 | IMX708 không có driver autofocus | Lấy nét cố định ở vị trí nghỉ của ống kính khi không cấp điện — dùng được trên chiếc đã thử, nhưng không chọn được và không đảm bảo giống nhau giữa các đơn vị |
 | Giới hạn gần ~1.3m so với ~0.8m của Module 2 | Vật trong tầm tay được phân giải kém hơn so với Module 2 |
-| Khung hình xoay 180° | Chưa sửa trong đường chụp ảnh; hiện VLM nhận cảnh bị lộn ngược |
+| Khung hình xoay 180° | Đã xử lý trong đường chụp ảnh (`ROTATE = 180`), VLM nhận cảnh đúng chiều |
 
 Hai giới hạn đầu sẽ hết khi khôi phục Module 2, sau khi có cáp ribbon thay thế để xác định hỏng là do
 module hay do cáp.

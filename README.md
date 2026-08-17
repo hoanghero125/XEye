@@ -5,7 +5,7 @@
 
 XEye is a wearable, on-device AI assistant for the visually impaired, built on [Qualcomm Dragonwing™ QCS6490](https://www.qualcomm.com/internet-of-things/products/q6-series/qcs6490) Platform - [Thundercomm RUBIK Pi 3](https://rubikpi.ai/).
 
-**Technical Notes:** [English](docs/technical_report.md) · [Tiếng Việt](docs/bao_cao_ky_thuat.md) *(Last updated: 15/08/2026)*
+**Technical Notes:** [English](docs/technical_report.md) · [Tiếng Việt](docs/bao_cao_ky_thuat.md) *(Last updated: 17/08/2026)*
 
 ## Pipeline
 
@@ -29,9 +29,9 @@ Camera ────→ Image input ────→ Vision Language Model
 | **RAM** | 8GB LPDDR4x |
 | **NPU** | Hexagon 780 (V73) — 12 TOPS |
 | **GPU** | Adreno 643 |
-| **Camera** | Raspberry Pi Camera Module 3 (IMX708), CSI connector 1 — captured via GStreamer `qtiqmmfsrc`. Substituted after the Module 2 stopped probing; autofocus is unsupported on this board |
+| **Camera** | Raspberry Pi Camera Module 3 (IMX708), CSI connector 2 — captured via GStreamer `qtiqmmfsrc`, rotated 180° on capture. Substituted after the Module 2 stopped probing; autofocus is unsupported on this board |
 | **Audio** | Seeed Studio ReSpeaker Lite (USB) — mic array + speaker out |
-| **Button** | PBS-33B 12mm momentary (2P, no LED, waterproof) across pin 13 (GPIO_24) and pin 14 (GND) of the 40-pin header, active-low on the internal pull-up |
+| **Button** | 3-pin momentary module with onboard pull-up — signal on pin 16 (`GPIO_26`), active-low. A bare 2-pin switch does not work here: without a resistor the line floats on release and latches |
 | **Power** | 3S2P Li-ion pack (6× 18650), 11.1V nominal, ~55.5 Wh — 1-2h under full load, 4-5h idle. Fed through a DC-DC module with USB-C PD output, since the board requires PD 3.0 at 12V/3A and will not boot without it |
 | **OS** | Ubuntu (Linux 6.8.0-1071-qcom) |
 
@@ -221,9 +221,11 @@ Since there is no screen, four short tones carry the state — rising means open
 
 Cues are suppressed by `--no-play` along with the answer.
 
-The button wires across **pin 13 (GPIO_24)** and **pin 14 (GND)** — adjacent on the header, so a 2-pin connector fits directly. Use the internal pull-up; if you add an external one it must be **≥50kΩ**, not the 10kΩ most tutorials specify, because of the board's level shifter.
+The button is a **3-pin module** — signal to **pin 16 (`GPIO_26`)**, plus its own VCC and GND. It reads active-low: the line rests at 3.3V and a press pulls it to 0V.
 
-libgpiod addresses the line as chip + offset. Both were confirmed on this board and are now the defaults, so nothing needs exporting: **`/dev/gpiochip4` offset 24** (`f100000.pinctrl`, the SoC TLMM — *not* `gpiochip0`, which is a PMIC). Ignore the sysfs number in RUBIK Pi's docs (559): it assumes a TLMM base of 535, while this kernel uses 547, putting the same pin at 571. `XEYE_BUTTON_CHIP` / `XEYE_BUTTON_LINE` override them if a board differs.
+> **A bare 2-pin switch does not work on this board.** Without a resistor the line is only driven while the contacts are closed; on release it floats, and a CMOS input holds its last charge. The pin latches at the pressed level and never returns, so exactly one press registers and everything after it is invisible. Wiring to 3.3V instead gives the same fault mirrored. The internal pull-up cannot rescue it either — `libgpiod`'s bias request is silently ignored by this pinctrl driver, verified across five lines. The module's onboard resistor is what creates the release edge.
+
+libgpiod addresses the line as chip + offset, and the defaults are already correct: **`/dev/gpiochip4` offset 26** (`f100000.pinctrl`, the SoC TLMM — *not* `gpiochip0`, which is a PMIC). Note the header's `GPIO_n` labels are the board's own signal names, not TLMM pin numbers — the official pinout diagram gives pin 16 = GPIO_26. Ignore the sysfs numbers in RUBIK Pi's docs; they assume a TLMM base of 535 where this kernel uses 547. `XEYE_BUTTON_CHIP` / `XEYE_BUTTON_LINE` override the defaults if a board differs.
 
 GPIO chips are root-only and the board has no `gpio` group, so grant access once before using `--button`:
 
@@ -253,7 +255,9 @@ export XEYE_MODE=prod                   # this shell / service
 
 Passing `--output PATH` always saves, even in prod, for one-off debugging.
 
-Without `--image`, `pipeline.py` streams 1280×720 from the camera through GStreamer (`qtiqmmfsrc camera=0`) for the duration of the question — this requires the Qualcomm camera stack on the board. It keeps a 10-frame ring buffer and picks the **sharpest** frame, not the newest: motion blur rises and falls through a walking gait, so a ~333ms window usually holds a stiller moment than its last frame. Scoring all 10 costs 43ms. Output is written to `data/audio/output.wav` by default (`--output` to change it).
+Without `--image`, `pipeline.py` streams 1280×720 from the camera through GStreamer (`qtiqmmfsrc camera=0`) for the duration of the question — this requires the Qualcomm camera stack on the board. It keeps a 10-frame ring buffer and picks the **sharpest** frame, not the newest: motion blur rises and falls through a walking gait, so a ~333ms window usually holds a stiller moment than its last frame. Scoring all 10 costs 43ms. The chosen frame is rotated 180° before sending, since the module is mounted inverted — orientation matters, the VLM answered *"a machine"* on an inverted frame against *"a laptop"* on the same frame upright (`XEYE_CAMERA_ROTATE=0` disables).
+
+> `camera=0` is an index into *detected* cameras, not a connector number — with one module it stays 0 whichever CSI port it is in. Asking for an index with no camera behind it fails to preroll rather than erroring. `dmesg | grep "Probe success"` reports the real slot. Output is written to `data/audio/output.wav` by default (`--output` to change it).
 
 > The board's CSI port takes a **22-pin 0.5mm FPC** (Raspberry Pi 5 style). Camera Module 2's stock 15-pin cable does not fit. Only the standard Module 2/3 are supported — not the NoIR or wide-angle variants. Never connect or disconnect the camera while the board is powered.
 

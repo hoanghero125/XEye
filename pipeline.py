@@ -27,8 +27,18 @@ DEV_OUTPUT   = "data/audio/output.wav"
 DEV_IMAGE    = "data/images/capture.jpg"
 DEV_QUESTION = "data/audio/question.wav"
 
-CAMERA = 0    # CSI connector: 0 = Camera connector 1, 1 = Camera connector 2
+# qtiqmmfsrc indexes DETECTED cameras, not CSI connectors: with one module attached this is 0
+# whichever connector it is plugged into. Requesting an index with no camera behind it does not
+# error, it fails to preroll. The kernel probe line reports the real slot:
+#     dmesg | grep "Probe success"      ->  "Probe success,slot:1,...,sensor_id:0x708"
+CAMERA = 0
 EXPOSURE = 2  # exposure-compensation (-12..12); +2 lifts indoor scenes without blowing highlights
+# Degrees counter-clockwise to rotate the captured frame; 0 disables. The Module 3 as mounted
+# delivers the scene inverted, and orientation measurably costs description quality — on one
+# frame the VLM answered "một chiếc máy móc" (a machine) inverted against "một chiếc laptop"
+# upright. Applied to the single grabbed frame, not the stream, so it costs ~10ms per query.
+# Re-measure if the module is ever remounted: XEYE_CAMERA_ROTATE=0 turns it off.
+ROTATE = int(os.getenv("XEYE_CAMERA_ROTATE", "180"))
 
 SOUND_CARD = "ReSpeaker"  # matched against /proc/asound/cards
 STT_RATE   = 16000        # what /stt expects
@@ -50,31 +60,24 @@ MAX_RECORD     = 12.0   # hard cap on one question
 SPEECH_TIMEOUT = 6.0    # give up if nobody speaks at all
 
 # ── Button ───────────────────────────────────────────────────────────────────
-# Momentary switch across physical pins 16 (GPIO_23) and 14 (GND) on the 40-pin header, read
-# active-low with the internal pull-up. Press means "start listening" — VAD decides when the
-# question ended, so the button is never held.
+# 3-pin momentary button module on physical pin 16 (GPIO_26), powered from the header, read
+# active-low: the module carries its own pull-up, so the line rests at 3.3V and the press
+# pulls it to 0V. Press means "start listening" — VAD decides when the question ended, so
+# the button is never held.
+#
+# A bare 2-pin switch was tried first and does not work here. Without a resistor the line only
+# floats when the switch opens, and a CMOS input holds its last charge — so the pin latched at
+# whatever the switch last connected it to and never returned. The module's onboard resistor is
+# what makes the release edge exist at all.
 #
 # libgpiod addresses lines as chip + offset, neither of which is the physical pin number (16).
 # The SoC pinctrl is /dev/gpiochip4 (f100000.pinctrl, 176 lines) — NOT gpiochip0, which is a
-# PMIC with 12 — and GPIO_23 is offset 23 there. `gpiofind` does not help: the gpiod CLI tools
-# are not installed, and no chip exposes line names anyway (the device tree sets no
-# gpio-line-names). Ignore the sysfs numbers in the vendor docs; they assume a TLMM base of 535
-# where this kernel uses 547, which is why chip + offset is the stable way to address a line.
+# PMIC with 12 — and physical pin 16 is GPIO_26, so offset 26. Note the header's GPIO_n labels
+# are its own numbering: they are not TLMM pin numbers for every pin, and the vendor's sysfs
+# numbers assume a TLMM base of 535 where this kernel uses 547. The official pinout diagram is
+# the authority; chip + offset is the stable way to address a line.
 #
-# **Pin 16, not the pin 13 (GPIO_24) the wiring notes originally called for.** Two faults ruled
-# 13 out. Its device-tree bias is `pull down`, so a released button reads low and a press — which
-# also pulls low — produces no edge to detect at all; and `libgpiod`'s PULL_UP request is
-# silently ignored by this pinctrl driver (verified across five lines), so the code could not
-# correct it. Forcing pull-up by writing the TLMM register directly did take effect, and three
-# unconnected control lines duly rose to high — but GPIO_24 stayed low, so something ties it to
-# ground and beats the pull-up.
-#
-# GPIO_23 avoids both: the device tree already gives it `pull up`, so it reads high at rest with
-# no register poking and the setting survives a reboot. Pins 14 and 16 are adjacent in the same
-# header row, so only the signal wire moves; ground stays put.
-#
-#     gpio23 : in  high func0 2mA pull up      <- this pin
-#     gpio24 : in  low  func0 2mA pull down    <- the one abandoned
+#     gpio26 : in  high func0 2mA pull up      <- rest state, released
 BUTTON_CHIP     = os.getenv("XEYE_BUTTON_CHIP", "/dev/gpiochip4")
 BUTTON_LINE     = os.getenv("XEYE_BUTTON_LINE", "26")   # GPIO_26 = physical pin 16
 BUTTON_DEBOUNCE = 50    # ms
@@ -383,7 +386,11 @@ class RollingCamera:
         best_score, best = max(scored, key=lambda sf: sf[0])
         if best_score == 0.0:          # every frame unreadable — fall back to the newest
             best = frames[-1]
-        shutil.copy(best, path)
+        if ROTATE % 360:
+            from PIL import Image      # only the camera path needs it
+            Image.open(best).rotate(ROTATE, expand=True).save(path, quality=95)
+        else:
+            shutil.copy(best, path)
         newest = scored[-1][0]
         gain = f", {best_score/newest:.2f}x sharper than newest" if newest > 0 else ""
         print(f"[camera] Frame saved → {path}  "
@@ -518,7 +525,7 @@ def wait_for_button():
     if hasattr(gpiod, "request_lines"):                      # libgpiod v2
         settings = gpiod.LineSettings(
             direction=gpiod.line.Direction.INPUT,
-            edge_detection=gpiod.line.Edge.FALLING,          # active-low: pressed pulls to GND
+            edge_detection=gpiod.line.Edge.FALLING,          # active-low: the module pulls to GND on press
             bias=gpiod.line.Bias.PULL_UP,
             debounce_period=timedelta(milliseconds=BUTTON_DEBOUNCE))
         with gpiod.request_lines(BUTTON_CHIP, consumer="xeye",

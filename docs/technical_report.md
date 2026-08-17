@@ -1,6 +1,6 @@
 # Technical Report: XEye
 
-**Last updated:** 15/08/2026 
+**Last updated:** 17/08/2026 
 **Author:** Do Pham Bao Hoang
 
 All performance figures in this report were measured on the running server on 23-24/07/2026 (RUBIK Pi 3, warm — the first request after startup is slower).
@@ -67,9 +67,9 @@ All performance figures in this report were measured on the running server on 23
 | CPU | 4× Cortex-A55 @1.96GHz + 3× Cortex-A78 @2.40GHz + 1× Cortex-X1 @2.71GHz |
 | GPU | Adreno 643 |
 | NPU | Hexagon 780 (V73), 12 TOPS |
-| Camera | Raspberry Pi Camera Module 3 (IMX708) on CSI connector 1, captured via GStreamer `qtiqmmfsrc` at 1280×720 NV12. Substituted after the Module 2 failed to probe (5.5.1); autofocus is unsupported on this board. Requires a 22-pin 0.5mm FPC; standard variant only (no NoIR/wide-angle) |
+| Camera | Raspberry Pi Camera Module 3 (IMX708) on CSI connector 2, captured via GStreamer `qtiqmmfsrc` at 1280×720 NV12, rotated 180° on capture. Substituted after the Module 2 failed to probe (5.5.1); autofocus is unsupported on this board. Requires a 22-pin 0.5mm FPC; standard variant only (no NoIR/wide-angle) |
 | Audio | Seeed Studio ReSpeaker Lite (USB) — mic array in, speaker out |
-| Button | PBS-33B 12mm momentary, 2P, no LED, waterproof — pins 13/14 of the 40-pin header, see 1.4 |
+| Button | 3-pin momentary module with onboard pull-up — signal on pin 16 (`GPIO_26`), active-low, see 1.4 |
 | Power | 3S2P Li-ion pack, ~55.5 Wh, through a DC-DC module with USB-C PD output — see 1.3 |
 | OS | Ubuntu (Linux 6.8.0-1071-qcom) |
 
@@ -132,52 +132,49 @@ which the device's own user cannot do.
 
 | Attribute | Value |
 |-----------|-------|
-| Switch | PBS-33B, 12mm panel mount, momentary, 2P, no LED, waterproof |
-| Rating | 1A/250V (mains-oriented; the actual load is microamps at 3.3V) |
-| Connection | Physical pin 13 (GPIO_24) and pin 14 (GND), 40-pin LS header |
-| Line address | `/dev/gpiochip4` (`f100000.pinctrl`) offset 24 |
-| Logic | Active-low, internal pull-up, no external resistor |
-| Debounce | 50ms, in the kernel via libgpiod where available |
-| Filter | 100nF across the switch terminals |
+| Switch | 3-pin momentary button module, with an onboard pull-up resistor |
+| Connection | Signal to physical pin 16 (`GPIO_26`), plus the module's own VCC and GND |
+| Line address | `/dev/gpiochip4` (`f100000.pinctrl`) offset 26 |
+| Logic | Active-low — the line rests at 3.3V and the press pulls it to 0V |
+| Edge | Falling, `gpiod.line.Edge.FALLING` with `Bias.PULL_UP` |
+| Debounce | 50ms, in the kernel via libgpiod |
 
 **Momentary, not latching, because VAD already owns the other end.** The press means only
 "start listening"; 2.2 decides when the question finished. Nothing is ever held down, which
 also suits a user who cannot see how long they are meant to hold it.
 
-**No external pull-up.** The header runs at 3.3V — the 1.8V level common on Qualcomm parts does
-not apply here — but the datasheet limits external pull-ups and pull-downs to **no less than
-50 kΩ**, a constraint of the on-board level shifter. The 10 kΩ that every Raspberry Pi tutorial
-specifies violates it by 5×. Using the SoC's internal pull-up avoids the question entirely.
+**A bare 2-pin switch does not work on this board, and the reason is worth recording.** With
+only a switch between the pin and ground, the line is driven only while the contacts are
+closed; when they open it is left floating, and a CMOS input holds its last charge. The pin
+therefore latched at whatever the switch last connected it to and never returned — a single
+press registered, and every press after it was invisible because the line was already at the
+pressed level. Reversing the wiring to 3.3V produced the identical fault mirrored: the line
+latched high instead of low. The module's onboard resistor is what actively restores the
+released level, and so what makes the release edge exist at all.
 
-**Pin choice.** 28 of the 40 pins are GPIO-capable but most carry a default function — 2× I2C
-(including pins 3 and 5), 1× UART (pins 8 and 10, `/dev/ttyHS3`), 1× SPI (pins 19, 21, 23, 24),
-1× I2S and 1× PWM — leaving 9 free. Pin 13 is one of them, and pin 14 is ground (verified on the
-board, not assumed from the Raspberry Pi layout), so the two form a GPIO/ground pair sitting
-physically side by side and a 2-pin connector seats directly with no crossed wires.
+The internal pull-up cannot substitute for it. `libgpiod`'s bias request is silently ignored by
+this pinctrl driver — verified across five separate lines, none of which responded to
+`PULL_UP` or `PULL_DOWN`. Writing the TLMM pin-config register directly does work, but it is
+lost on reboot and is no substitute for a resistor in the circuit.
 
-**Three numbering schemes describe the same pin, and none of them interchange.** Pin 13 is the
-physical position, `GPIO_24` is the board's signal name, and `559` is the global number the
-vendor documentation uses for the deprecated `/sys/class/gpio` interface. libgpiod wants none of
-these — it addresses a line as chip plus offset.
+**Pin choice.** The 40-pin header is Raspberry Pi-compatible in layout, and pin 16 is a plain
+GPIO with no default function. Pin 14 (GND) sits adjacent to it in the same row.
 
-Both were resolved on the board from the kernel's own pin table, which names the TLMM pins
-directly:
+**Header labels are not TLMM pin numbers, and this is the trap that cost the most time.** The
+header's `GPIO_n` names are the board's own signal names; the SoC's pinctrl separately names its
+pins `GPIO_0`–`GPIO_175`. The two schemes share a format and do not interchange — the header's
+pin 3 is labelled "GPIO_2 (I2C1_SDA)" while TLMM pin 2 is owned by `1c08000.pcie`. A summarised
+pinout table claiming pin 16 was `GPIO_23` sent every measurement to an unrelated line.
 
-```
-$ sudo cat /sys/kernel/debug/pinctrl/f100000.pinctrl/pinmux-pins
-pin 24 (GPIO_24): (MUX UNCLAIMED) (GPIO UNCLAIMED)
-```
+The authority is the pinout diagram in the vendor's 40-pin LS connector page, which gives
+**pin 16 = GPIO_26**, and hence offset 26 on `/dev/gpiochip4`. It is emphatically not
+`gpiochip0`, which is a PMIC (`c440000.spmi:pmic@8`) with 12 lines and no relationship to the
+header.
 
-So `GPIO_24` is **offset 24** on `/dev/gpiochip4` — `f100000.pinctrl`, the SoC TLMM, 176 lines.
-It is emphatically not `gpiochip0`, which is a PMIC (`c440000.spmi:pmic@8`) with 12 lines and no
-relationship to the 40-pin header.
-
-**The vendor's sysfs number is misleading on this kernel.** 559 assumes a TLMM base of 535;
-this kernel bases the same chip at 547, which puts GPIO_24 at 571. Deriving the offset by
-subtracting the running base from the documented sysfs number therefore yields 12 — the wrong
-line, and one that is also free and so fails silently rather than loudly. Chip plus offset is
-stable across kernels where the global sysfs number is not; the pin table above is the
-authority, not arithmetic on 559.
+**The vendor's sysfs numbers are misleading on this kernel.** They assume a TLMM base of 535
+where this kernel uses 547, so arithmetic on them yields a wrong — and typically also free —
+line that fails silently rather than loudly. Chip plus offset is stable across kernels where the
+global sysfs number is not.
 
 **`gpiofind` is not usable here.** The gpiod CLI tools are not installed, and no chip exposes
 line names in any case — the device tree sets no `gpio-line-names`, so all six chips report zero
@@ -188,11 +185,9 @@ has no `gpio` group, so button mode fails with `Permission denied` on an unprepa
 udev rule plus group membership grants it without running the pipeline as root; `pipeline.py`
 checks for access at startup and prints that fix rather than failing on the first press.
 
-**The 100nF filter earns its place twice.** Against the ~50 kΩ pull-up it forms a ~5ms RC,
-which both debounces in hardware and stops a long lead to a strap-mounted switch from
-false-triggering a high-impedance input. It also puts a small discharge spike across the
-contacts on each press, which matters because mains-rated contacts are not gold-plated and
-switching microamps is a dry-circuit condition where oxide films would otherwise build up.
+**A held button is reported, not hung on.** A falling edge cannot arrive on a line already low,
+so `wait_for_button()` reads the level before arming: if the button is held or stuck closed it
+says so and waits for release, rather than blocking silently forever.
 
 **It also turns `pipeline.py` into a loop.** `--button` waits for a press, answers, and returns
 to waiting, so the device needs no terminal after startup. A failed query is reported and the
@@ -1256,8 +1251,24 @@ application wants, but it is luck rather than configuration, and the Module 2 de
 design with a nearer limit. Restoring the Module 2 remains preferable once a replacement ribbon
 cable identifies whether the module or the cable failed.
 
-**Orientation.** The Module 3 as currently mounted delivers frames rotated 180°. This is not yet
-corrected in the capture path, so the VLM currently receives an inverted scene.
+**Orientation.** The Module 3 as mounted delivers frames rotated 180°, so the capture path
+rotates the grabbed frame back before it is sent (`ROTATE = 180` in `pipeline.py`, overridable
+with `XEYE_CAMERA_ROTATE`). Orientation measurably affects description quality — asked the same
+question about the same frame, the VLM answered *"một chiếc máy móc"* (a machine) inverted
+against *"một chiếc laptop"* (a laptop) upright. The rotation is applied to the single chosen
+frame rather than the video stream, so it costs ~10ms per query instead of running on every
+streamed frame.
+
+**`CAMERA` is a camera index, not a connector number.** `qtiqmmfsrc` enumerates *detected*
+cameras, so with one module attached the index is 0 whichever CSI connector it is plugged into —
+the module currently sits on connector 2 and is still `camera=0`. Requesting an index with no
+camera behind it does not raise an error; the pipeline simply fails to preroll. The kernel probe
+line reports the real slot:
+
+```
+$ dmesg | grep "Probe success"
+Probe success,slot:1,slave_addr:0x34,sensor_id:0x708
+```
 
 ### 5.6. Runtime Modes
 
@@ -1313,7 +1324,7 @@ carry into the current build:
 |------------|--------|
 | No autofocus driver on the IMX708 | Focus is fixed at the lens's unpowered rest position — usable on the unit tested, but neither selectable nor guaranteed across units |
 | Near limit ~1.3m vs the Module 2's ~0.8m | Objects within arm's reach are less well resolved than the Module 2 would render them |
-| Frames arrive rotated 180° | Not yet corrected in the capture path; the VLM currently receives an inverted scene |
+| Frames arrive rotated 180° | Corrected in the capture path (`ROTATE = 180`), so the VLM receives an upright scene |
 
 The first two resolve by restoring a Module 2 once a replacement ribbon cable establishes whether
 the module or the cable failed.
